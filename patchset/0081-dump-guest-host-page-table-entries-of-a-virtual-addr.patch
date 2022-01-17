@@ -1,0 +1,111 @@
+From 2660d164c405d4214e690c497057203462b3321f Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 21 Jun 2020 23:52:54 -0700
+Subject: [PATCH 081/140] dump guest/host page table entries of a virtual
+ address
+
+---
+ arch/x86/kvm/vmx/depriv.c | 59 +++++++++++++++++++++++++++++++++++----
+ 1 file changed, 54 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 0881333cf1ad..da241a493334 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -601,8 +601,6 @@ static void vmx_depriv_cpu(void *info)
+ 	if (test_handle_invalid_guest_state)
+ 		vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
+ 
+-	vmx_validate_guest_state();
+-
+ 	/*
+ 	 * Should we save/restore general purpose registers around vmx_depriv?
+ 	 */
+@@ -612,6 +610,8 @@ static void vmx_depriv_cpu(void *info)
+ 		// continue in non-root mode...
+ 		return;
+ 
++	vmx_validate_guest_state();
++
+ 	// still in root mode
+ 	if (vmx_depriv_result == 1)
+ 		pr_err("depriv: cpu%d launch failed\n", cpu);
+@@ -803,6 +803,53 @@ static inline u64 depriv_iret_stack_base(int cpu)
+ 	       CEA_ESTACK_SIZE(NMI) + 32 * 8;
+ }
+ 
++static void dump_va_page_table_entry(void *virtual_address)
++{
++	int cpu = raw_smp_processor_id(), i;
++	unsigned long *host_pte;
++	unsigned long *guest_pte;
++	unsigned long va = (unsigned long)virtual_address;
++	unsigned int va_shift = PGDIR_SHIFT;
++	bool host_pte_valid = true;
++	bool guest_pte_valid = true;
++
++	host_pte = (unsigned long *)__va(vmcs_readl(HOST_CR3) & CR3_ADDR_MASK);
++	guest_pte = (unsigned long *)__va(vmcs_readl(GUEST_CR3) & CR3_ADDR_MASK);
++
++	for (i = 4; i > 0; i--) {
++		u32 slot = (u32)(va >> va_shift) & 0x1fful;
++		va_shift -= 9;
++
++		if (host_pte_valid)
++			pr_info("depriv: cpu%d  host p%dd pte[%03d]: 0x%016lx\n",
++				cpu, i, slot, host_pte[slot]);
++
++		if (guest_pte_valid)
++			pr_info("depriv: cpu%d guest p%dd pte[%03d]: 0x%016lx\n",
++				cpu, i, slot, guest_pte[slot]);
++
++		if (host_pte_valid && guest_pte_valid && host_pte[slot] != guest_pte[slot])
++			pr_err("depriv: cpu%d mismatch pte at level %d\n", cpu, i);
++
++		if (host_pte_valid && host_pte[slot] & 0x1)
++			host_pte = __va(host_pte[slot] & CR3_ADDR_MASK);
++		else {
++			pr_err("depriv: cpu%d  host pte missing at level %d\n", cpu, i);
++			host_pte_valid = false;
++		}
++
++		if (guest_pte_valid && guest_pte[slot] & 0x1)
++			guest_pte = __va(guest_pte[slot] & CR3_ADDR_MASK);
++		else {
++			pr_err("depriv: cpu%d guest pte missing at level %d\n", cpu, i);
++			guest_pte_valid = false;
++		}
++
++		if (!host_pte_valid && !guest_pte_valid)
++			break;
++	}
++}
++
+ #define	DEPRIV_IRET_STACK_RIP							\
+ 	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_RIP))
+ #define	DEPRIV_IRET_STACK_CS							\
+@@ -841,6 +888,8 @@ void vmx_repriv_cpu_state(void)
+ 
+ 	cpumask_set_cpu(cpu, &depriv_cpu_root_mode_mask);
+ 
++	dump_va_page_table_entry((void *)iret_stack_base);
++
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK;
+ 
+ 	pr_info("depriv: cpu%d iret stack base %#lx: %#lx:%#lx  %#lx %#lx:%#lx\n",
+@@ -917,9 +966,9 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			     (unsigned int *)&regs[VCPU_REGS_RCX],
+ 			     (unsigned int *)&regs[VCPU_REGS_RDX]);
+ 
+-		if (test_handle_vmresume_failure && counter > 12000) {
+-			pr_info("depriv: cpu%d (%ld) triggering vmresume fail\n",
+-				cpu, counter);
++		if (test_handle_vmresume_failure && counter > 22000) {
++			pr_info("depriv: cpu%d (%ld) triggering vmresume fail at %#lx\n",
++				cpu, counter, rip);
+ 			//vmcs_write32(CR3_TARGET_COUNT, 0x100000);
+ 			vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
+ 		}
+-- 
+2.34.1
+

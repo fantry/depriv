@@ -1,0 +1,121 @@
+From 4f292b8ce060c6d1b4813ffff8d6b0e1d35743ef Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 20 Jun 2020 09:46:19 -0700
+Subject: [PATCH 069/140] fix smep fliping test
+
+---
+ arch/x86/kvm/vmx/depriv_handler.c | 13 +++++----
+ drivers/misc/smep_flipor.c        | 48 ++++++++++++++++++++++---------
+ 2 files changed, 42 insertions(+), 19 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv_handler.c b/arch/x86/kvm/vmx/depriv_handler.c
+index 9c4a4e91461e..ce21ef2e5343 100644
+--- a/arch/x86/kvm/vmx/depriv_handler.c
++++ b/arch/x86/kvm/vmx/depriv_handler.c
+@@ -90,18 +90,19 @@ static void handle_cr4_access(unsigned long *regs, unsigned long cnt)
+ 	switch ((qualification >> 4) & 3) {
+ 	case 0: { /* mov to cr */
+ 		unsigned long val = regs[reg];
+-		unsigned long cr4 = vmcs_readl(GUEST_CR4);
++		unsigned long cr4 = vmcs_readl(CR4_READ_SHADOW);
++
++		vmcs_writel(CR4_READ_SHADOW, val);
+ 
+ 		if ((val ^ cr4) & X86_CR4_SMEP) {
+-			if (val & X86_CR4_SMEP) {
+-				pr_err("depriv: cpu%d (%ld) setting SMEP\n", cpu, cnt);
+-			} else {
++			if (val & X86_CR4_SMEP)
++				pr_info("depriv: cpu%d (%ld) setting SMEP\n", cpu, cnt);
++			else {
+ 				pr_err("depriv: cpu%d (%ld) clearing SMEP\n", cpu, cnt);
+ 				val |= X86_CR4_SMEP;
+ 			}
+ 		}
+ 
+-		vmcs_writel(CR4_READ_SHADOW, val);
+ 		vmcs_writel(GUEST_CR4, val);
+ 
+ 		pr_info("depriv: cpu%d (%ld) wrote cr4 from reg%d: %#lx (%#lx)\n",
+@@ -109,7 +110,7 @@ static void handle_cr4_access(unsigned long *regs, unsigned long cnt)
+ 		break;
+ 	}
+ 	case 1: /*mov from cr*/
+-		regs[reg] = vmcs_readl(GUEST_CR4);
++		regs[reg] = vmcs_readl(CR4_READ_SHADOW);
+ 
+ 		/* XXX RSP in regs won't be loaded into non-root mode */
+ 		if (reg == VCPU_REGS_RSP)
+diff --git a/drivers/misc/smep_flipor.c b/drivers/misc/smep_flipor.c
+index b2f7cfbfedb1..98dc2d48b4fc 100644
+--- a/drivers/misc/smep_flipor.c
++++ b/drivers/misc/smep_flipor.c
+@@ -6,30 +6,52 @@
+ MODULE_LICENSE("GPL");
+ MODULE_AUTHOR("Xin Li");
+ 
+-static int __init smep_init(void)
++static int target_cpu;
++
++static void smep(bool enable)
+ {
++	int cpu = raw_smp_processor_id();
+ 	unsigned long val;
+ 
+-	asm volatile("mov %%cr4,%0\n\t" : "=r" (val), "=m" (__force_order));
+-	val &= ~X86_CR4_SMEP;
++	asm volatile("mov %%cr4,%0\n\t"
++		     : "=r" (val), "=m" (__force_order));
++	printk(KERN_INFO "smep: cpu%d cr4: %#lx\n", cpu, val);
++
++	if (enable)
++		val |= X86_CR4_SMEP;
++	else {
++		val &= ~X86_CR4_SMEP;
++		target_cpu = cpu;
++	}
++	printk(KERN_INFO "smep: cpu%d cr4 being set to %#lx\n", cpu, val);
++
+ 	asm volatile("mov %0,%%cr4"
+ 		     : "+r" (val));
+ 
+-	printk(KERN_INFO "smep driver loaded\n");
+-	return 0;
++	asm volatile("mov %%cr4,%0\n\t"
++		     : "=r" (val), "=m" (__force_order));
++	printk(KERN_INFO "smep: cpu%d cr4 set to %#lx\n", cpu, val);
+ }
+ 
+-static void __exit smep_exit(void)
++static int __init smep_init(void)
+ {
+-	unsigned long val;
++	preempt_disable();
++	smep(false);
++	preempt_enable();
+ 
+-	asm volatile("mov %%cr4,%0\n\t"
+-		     : "=r" (val), "=m" (__force_order));
+-	val |= X86_CR4_SMEP;
+-	asm volatile("mov %0,%%cr4"
+-		     : "+r" (val));
++	printk(KERN_INFO "smep: smep driver loaded\n");
++	return 0;
++}
+ 
+-	printk(KERN_INFO "smep driver unloaded\n");
++static void smep_set(void *info)
++{
++	smep(true);
++}
++
++static void __exit smep_exit(void)
++{
++	smp_call_function_single(target_cpu, smep_set, NULL, 1);
++	printk(KERN_INFO "smep: smep driver unloaded\n");
+ }
+ 
+ module_init(smep_init);
+-- 
+2.34.1
+

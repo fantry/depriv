@@ -1,0 +1,278 @@
+From edb0d7ac5850764e16bd6e516bdd800a72678574 Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Fri, 12 Jun 2020 13:57:32 -0700
+Subject: [PATCH 015/140] share fault injection code
+
+---
+ arch/x86/kvm/vmx/vmx.c | 130 ++++++++++++++++++++---------------------
+ 1 file changed, 62 insertions(+), 68 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 1f138fee4e60..469f454477bd 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8582,7 +8582,7 @@ static inline void vmx_repriv_cpu_misc(void)
+ 
+ #define REPRIV_SEGMENT(tag, TAG) do {						\
+ 	ar = vmcs_read32(GUEST_##TAG##S_AR_BYTES);				\
+-	if ((ar >> 16) & 0x1) {							\
++	if (ar & VMX_AR_UNUSABLE_MASK) {					\
+ 		pr_info("depriv: cpu%d " #TAG "S unusable\n", cpu);		\
+ 		break;								\
+ 	}									\
+@@ -8809,11 +8809,10 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 	 * the following fs base sync logic is confusing, but anyway it works
+ 	 * on VMWare ESXi and VMWare Fusion.
+ 	 */
+-	fs_base = read_msr(MSR_FS_BASE);
+-	vmcs_writel(GUEST_FS_BASE, fs_base);
+-
++	vmcs_writel(GUEST_FS_BASE, read_msr(MSR_FS_BASE));
+ #endif
+ 
++
+ #if 0
+ 	pr_info("depriv: cpu%d (%ld) upon VM-Exit GS base %#lx : %#lx : %#lx : %#lx\n",
+ 		cpu, cnt, read_msr(MSR_GS_BASE), vmcs_readl(HOST_GS_BASE),
+@@ -8841,8 +8840,13 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		bool continue_in_root_mode = true;
+ 		u32 intr_info = vmcs_read32(VM_EXIT_INTR_INFO);
+ 		u8 vector = intr_info & INTR_INFO_VECTOR_MASK;
++		u32 error_code = 0;
+ 
+-		pr_info("depriv: cpu%d intr info: %#x\n", cpu, intr_info);
++		if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
++			error_code = vmcs_read32(VM_EXIT_INTR_ERROR_CODE);
++
++		pr_info("depriv: cpu%d intr info: %#x error code %#x\n",
++			cpu, intr_info, error_code);
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 		dump_guest_insn(guest_rip, insn_len, insn);
+@@ -8854,40 +8858,11 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			pr_info("depriv: cpu%d hit UD @ rip %#lx insn: %s\n",
+ 				cpu, guest_rip, insn);
+ 		} else if (is_page_fault(intr_info)) {
+-			unsigned long cr2 = vmcs_readl(EXIT_QUALIFICATION);
+-			u32 intr, error_code = 0;
+-
+-			if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
+-				error_code = vmcs_read32(VM_EXIT_INTR_ERROR_CODE);
+-
+ 			pr_info("depriv: cpu%d page fault @ %#lx with error code %#x\n",
+-				cpu, cr2, error_code);
+-
+-			pr_info("depriv: cpu%d (%ld) FS base %#lx : %#lx : %#lx\n",
+-				cpu, cnt, read_msr(MSR_FS_BASE),
+-				vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
+-
+-			pr_info("depriv: cpu%d (%ld) GS base %#lx : %#lx : %#lx : %#lx\n",
+-				cpu, cnt, read_msr(MSR_GS_BASE), vmcs_readl(HOST_GS_BASE),
+-				vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+-
+-			intr = vector | INTR_INFO_VALID_MASK;
+-			intr |= INTR_TYPE_HARD_EXCEPTION | INTR_INFO_DELIVER_CODE_MASK;
+-			vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr);
+-			vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, insn_len);
+-			vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
+-			pr_info("depriv: cpu%d injecting exception %d, continue in non-root mode\n",
+-				cpu, vector);
+-
+-			dump_vmcs();
+-			vmx_check_guest_state();
+-			enable_log = true;
++				cpu, vmcs_readl(EXIT_QUALIFICATION), error_code);
+ 			continue_in_root_mode = false;
+ 		} else if (is_gp_fault(intr_info)) {
+-			pr_info("depriv: cpu%d hit GP @ rip:%#lx insn: %s\n",
+-				cpu, guest_rip, insn);
+-
+-			DEPRIV_DUMP_GPRS;
++			continue_in_root_mode = false;
+ 		} else if (is_machine_check(intr_info))
+ 			pr_info("depriv: cpu%d to handle machine check in root mode\n", cpu);
+ 		else if (is_machine_check(intr_info) || is_nmi(intr_info))
+@@ -8898,8 +8873,32 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 				cpu, vector);
+ 			DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 		} else {
+-			pr_info("depriv: cpu%d hit exception %d, continue in non-root mode\n",
++			u32 intr;
++
++			intr = vector | INTR_INFO_VALID_MASK;
++			if (vector == DF_VECTOR || vector == GP_VECTOR || vector == PF_VECTOR)
++				intr |= INTR_TYPE_HARD_EXCEPTION;
++			if (vector == GP_VECTOR || vector == PF_VECTOR)
++				intr |= INTR_INFO_DELIVER_CODE_MASK;
++			vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr);
++			vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, insn_len);
++			vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
++			pr_info("depriv: cpu%d injecting exception %d, continue in non-root mode\n",
+ 				cpu, vector);
++
++			pr_info("depriv: cpu%d (%ld) FS base %#lx : %#lx : %#lx\n",
++				cpu, cnt, read_msr(MSR_FS_BASE),
++				vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
++
++			pr_info("depriv: cpu%d (%ld) GS base %#lx : %#lx : %#lx : %#lx\n",
++				cpu, cnt, read_msr(MSR_GS_BASE), vmcs_readl(HOST_GS_BASE),
++				vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
++
++			DEPRIV_DUMP_GPRS;
++			enable_log = true;
++			dump_vmcs();
++			vmx_check_guest_state();
++
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+ 	}
+@@ -9123,7 +9122,7 @@ static int __init setup_depriv_vmcs_config(void)
+ 
+ 	memset(&depriv_vmcs_conf, 0, sizeof(depriv_vmcs_conf));
+ 	min = 0;
+-	opt = //CPU_BASED_USE_MSR_BITMAPS |
++	opt = CPU_BASED_USE_MSR_BITMAPS |
+ 	      CPU_BASED_ACTIVATE_SECONDARY_CONTROLS;
+ 	if (adjust_vmx_controls(min, opt, MSR_IA32_VMX_PROCBASED_CTLS,
+ 				&_cpu_based_exec_control) < 0)
+@@ -9508,8 +9507,6 @@ void vmx_check_guest_state(void)
+ 	CHECK_IS_HOST_VMCS_FIELD_ADDR_CANONICAL(IA32_SYSENTER_ESP);
+ 	CHECK_IS_HOST_VMCS_FIELD_ADDR_CANONICAL(IA32_SYSENTER_EIP);
+ 
+-	CHECK(vmexit_ctl & VM_EXIT_LOAD_IA32_PERF_GLOBAL_CTRL);
+-
+ 	if (vmexit_ctl & VM_EXIT_LOAD_IA32_PAT) {
+ 		u64 pat = vmcs_read64(HOST_IA32_PAT);
+ 		unsigned i;
+@@ -9565,11 +9562,6 @@ void vmx_check_guest_state(void)
+ 
+ 	if (vmentry_ctl & VM_ENTRY_LOAD_DEBUG_CONTROLS) {
+ 		u64 debug_ctrl_reserved = 0xffffffffffff003cull;
+-#if 0
+-		if (!CpuidInfo_IsSet(RTM, CPUID_GetHostCPUID())) {
+-			debug_ctrlRsvd |= MSR_DEBUGCTL_RTM;
+-		}
+-#endif
+ 		CHECK((debug_ctrl & debug_ctrl_reserved) == 0);
+ 	}
+ 
+@@ -9581,8 +9573,6 @@ void vmx_check_guest_state(void)
+ 	CHECK_IS_GUEST_VMCS_FIELD_ADDR_CANONICAL(SYSENTER_ESP);
+ 	CHECK_IS_GUEST_VMCS_FIELD_ADDR_CANONICAL(SYSENTER_EIP);
+ 
+-	CHECK(vmentry_ctl & VM_ENTRY_LOAD_IA32_PERF_GLOBAL_CTRL);
+-
+ 	if (vmentry_ctl & VM_ENTRY_LOAD_IA32_PAT) {
+ 		u64 pat = vmcs_read64(GUEST_IA32_PAT);
+ 		unsigned i;
+@@ -9618,19 +9608,23 @@ void vmx_check_guest_state(void)
+ 		u32 limit = vmcs_read32(kvm_vmx_segment_fields[s].limit);
+ 		u32 orig_ar = vmcs_read32(kvm_vmx_segment_fields[s].ar_bytes);
+ 		u16 ar = orig_ar;
+-		bool unusable = !((orig_ar >> 16) & 0x1);
+-		unsigned rpl = selector & 0x3;
+-		unsigned ti = (selector >> 2) & 0x1;
+-		unsigned type = ar & 0xf;
+-		unsigned dpl = (ar >> 5) & 0x3;
+-#if 0
+-		pr_err("seg %d: sel=0x%04x, attr=0x%05x, limit=0x%08x, base=0x%016lx\n",
+-		       s, selector, orig_ar, limit, base);
+-#endif
++		bool unusable = orig_ar & VMX_AR_UNUSABLE_MASK;
++		bool present = ar & VMX_AR_P_MASK;
++		unsigned rpl = selector & SEGMENT_RPL_MASK;
++		unsigned ti = selector & SEGMENT_TI_MASK;
++		unsigned type = ar & VMX_AR_TYPE_MASK;
++		unsigned dpl = VMX_AR_DPL(ar);
++
++		if (unusable) {
++			pr_err("seg %d: sel=0x%04x, attr=0x%05x, limit=0x%08x, base=0x%016lx\n",
++			       s, selector, orig_ar, limit, base);
++			continue;
++		}
++
+ 		if (s == VCPU_SREG_TR) {
+ 			CHECK(ti == 0);
+ 		} else if (s == VCPU_SREG_LDTR) {
+-			CHECK(unusable || ti == 0);
++			CHECK(!present || ti == 0);
+ 		} else if (s == VCPU_SREG_SS) {
+ 			CHECK(vm86_active ||
+ 			      unrestricted ||
+@@ -9643,11 +9637,11 @@ void vmx_check_guest_state(void)
+ 		if (s == VCPU_SREG_TR || s == VCPU_SREG_FS || s == VCPU_SREG_GS) {
+ 			CHECK_IS_GUEST_ADDR_CANONICAL(base);
+ 		} else if (s == VCPU_SREG_LDTR) {
+-			CHECK(unusable || is_canonical_address(base, vmcs_readl(GUEST_CR4)));
++			CHECK(!present || is_canonical_address(base, vmcs_readl(GUEST_CR4)));
+ 		} else if (s == VCPU_SREG_CS) {
+ 			CHECK(!((u32)(base >> 32)));
+ 		} else {
+-			CHECK(unusable || !((u32)(base >> 32)));
++			CHECK(!present || !((u32)(base >> 32)));
+ 		}
+ 
+ 		if (s < VCPU_SREG_LDTR && vm86_active) {
+@@ -9664,8 +9658,8 @@ void vmx_check_guest_state(void)
+ 					      (type & 9) == 9); /* Must be code, accessed. */
+ 				} else if (s == VCPU_SREG_SS) {
+ 					/* If not a null selector, must be data, accessed, writable. */
+-					CHECK(unusable || type == 3 || type == 7);
+-				} else if (!unusable) {
++					CHECK(!present || type == 3 || type == 7);
++				} else if (present) {
+ 					/* Must be accessed. Also must be data or writable. */
+ 					CHECK((type & 1) == 1 &&
+ 					      ((type & 8) == 0 || (type & 2) == 2));
+@@ -9674,7 +9668,7 @@ void vmx_check_guest_state(void)
+ 				if (s == VCPU_SREG_TR) {
+ 					CHECK(!((ar >> 4) & 0x1));
+ 				}
+-				if (s != VCPU_SREG_TR && !unusable) {
++				if (s != VCPU_SREG_TR && present) {
+ 					CHECK((ar >> 4) & 0x1);
+ 				}
+ 				// Bits 6:5 (DPL).
+@@ -9693,16 +9687,16 @@ void vmx_check_guest_state(void)
+ 					} else {
+ 						CHECK(dpl == rpl);
+ 					}
+-				} else if (!unrestricted && !unusable && type <= 11) {
++				} else if (!unrestricted && present && type <= 11) {
+ 					/* Not a conforming code segment. */
+ 					CHECK(dpl >= rpl);
+ 				}
+ 				// Bit 7 (P).
+-				if (s == VCPU_SREG_CS || !unusable) {
++				if (s == VCPU_SREG_CS || present) {
+ 					CHECK((ar >> 7) & 0x1);
+ 				}
+ 				// Bits 11:8, 31:17 (reserved).
+-				if (s == VCPU_SREG_CS || !unusable) {
++				if (s == VCPU_SREG_CS || present) {
+ 					CHECK((ar & 0xfffe0f00) == 0);
+ 				}
+ 				// Bit 14 (D/B).
+@@ -9710,7 +9704,7 @@ void vmx_check_guest_state(void)
+ 					CHECK(!longmode || !((ar >> 13) & 0x1) || ((ar >> 14) & 0x1) == 0);
+ 				}
+ 				// Bit 15 (G).
+-				if (s == VCPU_SREG_CS || !unusable) {
++				if (s == VCPU_SREG_CS || present) {
+ 					CHECK((limit & PAGE_M) == PAGE_M|| !((ar >> 15) & 0x1));
+ 					CHECK(limit >> 20 == 0 || ((ar >> 15) & 0x1));
+ 				}
+@@ -9723,8 +9717,8 @@ void vmx_check_guest_state(void)
+ 			CHECK((ar & 0xfffe0f00) == 0);
+ 			CHECK((limit & PAGE_M) == PAGE_M|| !((ar >> 15) & 0x1));
+ 			CHECK(limit >> 20 == 0 || ((ar >> 15) & 0x1));
+-			CHECK(!unusable);
+-		} else if (s == VCPU_SREG_LDTR && !unusable) {
++			CHECK(present);
++		} else if (s == VCPU_SREG_LDTR && present) {
+ 			/* Must be a LDT selector. */
+ 			CHECK(type == 2);
+ 			CHECK(!((ar >> 4) & 0x1));
+-- 
+2.34.1
+

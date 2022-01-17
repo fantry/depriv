@@ -1,0 +1,31 @@
+From 325fb9454801378be09449491a9d7d7a84f4c7d8 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 18 Jun 2020 11:00:08 -0700
+Subject: [PATCH 056/140] use u8 when possible
+
+---
+ arch/x86/kvm/vmx/depriv.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 03d851865e26..929e0c57ff3d 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -138,10 +138,10 @@ static void vmx_check_guest_segment(u8 seg, bool vm86_active,
+ 	unsigned long base = vmcs_readl(sel + GUEST_ES_BASE - GUEST_ES_SELECTOR);
+ 	u32 limit = vmcs_read32(sel + GUEST_ES_LIMIT - GUEST_ES_SELECTOR);
+ 	u32 ar = vmcs_read32(sel + GUEST_ES_AR_BYTES - GUEST_ES_SELECTOR);
+-	unsigned rpl = selector & SEGMENT_RPL_MASK;
+-	unsigned ti = selector & SEGMENT_TI_MASK;
+-	unsigned type = ar & VMX_AR_TYPE_MASK;
+-	unsigned dpl = VMX_AR_DPL(ar);
++	u8 rpl = selector & SEGMENT_RPL_MASK;
++	u8 ti = selector & SEGMENT_TI_MASK;
++	u8 type = ar & VMX_AR_TYPE_MASK;
++	u8 dpl = VMX_AR_DPL(ar);
+ 
+ 	if (ar & VMX_AR_UNUSABLE_MASK)
+ 		return;
+-- 
+2.34.1
+

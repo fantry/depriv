@@ -1,0 +1,196 @@
+From 2cb31a3eecfd2aecabdf642a77004d03320d20fc Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 14 Jun 2020 22:06:38 -0700
+Subject: [PATCH 030/140] elegantly quit kvm-intel module
+
+---
+ arch/x86/kvm/vmx/depriv.c | 102 ++++++++++++++++++++++++++++----------
+ 1 file changed, 75 insertions(+), 27 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index d67090170eb2..3f1fb94d9fc6 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -29,6 +29,18 @@ MODULE_LICENSE("GPL");
+  */
+ #define DEPRIV_HOST_STACK_RESERVED_BYTES (16 * 8)
+ 
++#define DEPRIV_HOST_STACK_GUEST_RIP_OFFSET	(0 * 8)
++#define DEPRIV_HOST_STACK_GUEST_CS_OFFSET	(1 * 8)
++#define DEPRIV_HOST_STACK_GUEST_RFLAGS_OFFSET	(2 * 8)
++#define DEPRIV_HOST_STACK_GUEST_RSP_OFFSET	(3 * 8)
++#define DEPRIV_HOST_STACK_GUEST_SS_OFFSET	(4 * 8)
++#define DEPRIV_HOST_STACK_GUEST_CR3_OFFSET	(5 * 8)
++#define DEPRIV_HOST_STACK_GUEST_GS_BASE_OFFSET	(6 * 8)
++#define DEPRIV_HOST_STACK_GUEST_FS_BASE_OFFSET	(7 * 8)
++
++#define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(8 * 8)
++#define DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE	(9 * 8)
++
+ static struct vmcs_config depriv_vmcs_conf;
+ static DEFINE_PER_CPU(struct vmcs *, depriv_vmcs);
+ static DEFINE_PER_CPU(void *, depriv_cpu_state);
+@@ -993,15 +1005,32 @@ static void vmx_depriv_cpu_autosave_msrs(struct vmx_msrs *msrs)
+ 	vmcs_write64(VM_EXIT_MSR_STORE_ADDR, __pa(msrs->val));
+ }
+ 
++#define	DEPRIV_IRET_STACK_RIP							\
++	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_RIP_OFFSET))
++#define	DEPRIV_IRET_STACK_CS							\
++	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_CS_OFFSET))
++#define	DEPRIV_IRET_STACK_RFLAGS						\
++	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_RFLAGS_OFFSET))
++#define	DEPRIV_IRET_STACK_RSP							\
++	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_RSP_OFFSET))
++#define	DEPRIV_IRET_STACK_SS							\
++	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_SS_OFFSET))
++#define	DEPRIV_IRET_STACK_CR3							\
++	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_CR3_OFFSET))
++#define	DEPRIV_IRET_STACK_GS_BASE						\
++	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_GS_BASE_OFFSET))
++#define	DEPRIV_IRET_STACK_FS_BASE						\
++	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_FS_BASE_OFFSET))
++
+ #define DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ip_off) do {			\
+-	*(unsigned long *)(host_rsp + 0x0) = rip + (ip_off);			\
+-	*(unsigned long *)(host_rsp + 0x8) = vmcs_read16(GUEST_CS_SELECTOR);	\
+-	*(unsigned long *)(host_rsp + 0x10) = vmcs_readl(GUEST_RFLAGS);		\
+-	*(unsigned long *)(host_rsp + 0x18) = vmcs_readl(GUEST_RSP);		\
+-	*(unsigned long *)(host_rsp + 0x20) = vmcs_read16(GUEST_SS_SELECTOR);	\
+-	*(unsigned long *)(host_rsp + 0x28) = vmcs_readl(GUEST_CR3);		\
+-	*(unsigned long *)(host_rsp + 0x30) = vmcs_readl(GUEST_GS_BASE);	\
+-	*(unsigned long *)(host_rsp + 0x38) = vmcs_readl(GUEST_FS_BASE);	\
++	DEPRIV_IRET_STACK_RIP		= rip + (ip_off);			\
++	DEPRIV_IRET_STACK_CS		= vmcs_read16(GUEST_CS_SELECTOR);	\
++	DEPRIV_IRET_STACK_RFLAGS	= vmcs_readl(GUEST_RFLAGS);		\
++	DEPRIV_IRET_STACK_RSP		= vmcs_readl(GUEST_RSP);		\
++	DEPRIV_IRET_STACK_SS		= vmcs_read16(GUEST_SS_SELECTOR);	\
++	DEPRIV_IRET_STACK_CR3		= vmcs_readl(GUEST_CR3);		\
++	DEPRIV_IRET_STACK_GS_BASE	= vmcs_readl(GUEST_GS_BASE);		\
++	DEPRIV_IRET_STACK_FS_BASE	= vmcs_readl(GUEST_FS_BASE);		\
+ } while (0)
+ 
+ static void __init vmx_depriv_cpu(void *info)
+@@ -1093,6 +1122,9 @@ static void __init vmx_depriv_cpu(void *info)
+ 	vmx_depriv_result = vmx_depriv(host_rsp);
+ 	if (!vmx_depriv_result) {
+ 		// continue in non-root mode...
++		bool *to_root_mode = (bool *)(host_rsp + DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
++		unsigned long fs_base;
++
+ 		asm volatile("mov %%rsp,%0" : "=m"(rsp));
+ 		asm volatile("xor %%rax,%%rax\n\t"
+ 			     "pushf\n\t"
+@@ -1102,9 +1134,17 @@ static void __init vmx_depriv_cpu(void *info)
+ 		pr_info("depriv: cpu%d deprivileged: rsp=%#lx  rflags=%#lx\n",
+ 			cpu, rsp, rflags);
+ 
+-		wrmsrl(MSR_FS_BASE, read_msr(MSR_FS_BASE));
+-		wrmsrl(MSR_GS_BASE, read_msr(MSR_GS_BASE));
+-		wrmsrl(MSR_KERNEL_GS_BASE, read_msr(MSR_KERNEL_GS_BASE));
++		fs_base = read_msr(MSR_FS_BASE);
++
++		loadsegment(fs, __KERNEL_DS);
++
++		*to_root_mode = false;
++		vmx_depriv_vmcall();
++
++		loadsegment(fs, 0);
++		wrmsrl(MSR_FS_BASE, fs_base);
++
++		*to_root_mode = true;
+ 		vmx_depriv_vmcall();
+ 		return;
+ 	}
+@@ -1279,14 +1319,19 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ 
+ static void vmx_repriv_cpu(void *info)
+ {
+-	/* trigger a vmcall vmexit to reprivilege */
+-#if 0
+-	asm volatile("push %%rbp; vmcall; pop %%rbp" : : :
+-		     "rax", "rcx", "rdx", "rbx",
+-		     "rsi", "rdi", "r8", "r9", "r10",
+-		     "r11", "r12", "r13", "r14", "r15");
+-#endif
++	int cpu = smp_processor_id();
++	bool *to_root_mode = (bool *)(per_cpu(depriv_cpu_state, cpu) +
++				      DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
++				      DEPRIV_HOST_STACK_RESERVED_BYTES +
++				      DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
++
++	*to_root_mode = true;
+ 
++	// if already in root mode, then VMfail (VMCALL executed in VMX root operation)
++	vmx_depriv_vmcall();
++
++	// continue in root mode...
++	pr_info("depriv: cpu%d reprivileged\n", cpu);
+ 	vmx_repriv_cpu_release_resources();
+ }
+ 
+@@ -1357,7 +1402,7 @@ static void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ 
+ static void vmx_depriv_cpu_sync_fsgs_base(unsigned long host_rsp, u32 reason)
+ {
+-	unsigned long *cnt = (unsigned long *)(host_rsp + 0x40);
++	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
+ 	int cpu = smp_processor_id();
+ 	struct vmx_msrs *msrs = (struct vmx_msrs *)per_cpu(depriv_cpu_state, cpu);
+ 	unsigned long base;
+@@ -1388,7 +1433,7 @@ static void vmx_depriv_cpu_sync_fsgs_base(unsigned long host_rsp, u32 reason)
+  */
+ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ {
+-	unsigned long *cnt = (unsigned long *)(host_rsp + 0x40);
++	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
+ 	int cpu = smp_processor_id();
+ 	unsigned long base, last_base;
+ 
+@@ -1418,7 +1463,7 @@ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ {
+ 	unsigned long host_rsp = vmcs_readl(HOST_RSP);
+-	unsigned long *cnt = (unsigned long *)(host_rsp + 0x40);
++	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
+ 	unsigned long rip = vmcs_readl(GUEST_RIP);
+ 	unsigned long rsp = vmcs_readl(GUEST_RSP);
+ 	char insn[64];
+@@ -1453,7 +1498,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		enable_log = false;
+ 	}
+ 
+-
+ 	switch (reason) {
+ 	case EXIT_REASON_EXCEPTION_NMI: {
+ 		bool continue_in_root_mode = true;
+@@ -1605,17 +1649,21 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		}
+ 	}
+ 
+-	case EXIT_REASON_VMCALL:
++	case EXIT_REASON_VMCALL: {
++		bool *to_root_mode = (bool *)(host_rsp + DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
++
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
+-		if (true) {
++		if (*to_root_mode) {
++			pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, continue in root mode\n",
++				cpu, *cnt, rip);
++			DEPRIV_CONTINUE_IN_ROOT_MODE(insn_len);
++		} else {
+ 			pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, continue in non-root mode\n",
+ 				cpu, *cnt, rip);
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+-
+-		DEPRIV_CONTINUE_IN_ROOT_MODE(insn_len);
+-		break;
++	}
+ 
+ 	case EXIT_REASON_MSR_READ: {
+ 		u32 ecx = (u32)regs[VCPU_REGS_RCX];
+-- 
+2.34.1
+

@@ -1,0 +1,313 @@
+From 4c25ec72ed0b872c5bfabbf972ffdb18dd1d0d1f Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 10 Sep 2020 00:26:04 -0700
+Subject: [PATCH 109/140] refactor common code
+
+---
+ arch/x86/depriv/Makefile           |  2 +-
+ arch/x86/depriv/depriv.h           | 10 --------
+ arch/x86/depriv/vmx/depriv.c       | 36 +++++++++++++++++++++++----
+ arch/x86/depriv/vmx/depriv_entry.S |  7 +++++-
+ arch/x86/depriv/vmx/vmx.h          |  1 +
+ arch/x86/depriv/x86.c              | 31 ++++++++++++++++++++++--
+ arch/x86/entry/entry_64.S          |  5 ++++
+ arch/x86/include/asm/depriv.h      | 39 ++----------------------------
+ arch/x86/include/asm/switch_to.h   |  3 ---
+ include/linux/depriv.h             | 12 +++++++++
+ 10 files changed, 87 insertions(+), 59 deletions(-)
+ delete mode 100644 arch/x86/depriv/depriv.h
+ create mode 100644 include/linux/depriv.h
+
+diff --git a/arch/x86/depriv/Makefile b/arch/x86/depriv/Makefile
+index 4f9af271be83..37b723ab0b61 100644
+--- a/arch/x86/depriv/Makefile
++++ b/arch/x86/depriv/Makefile
+@@ -12,7 +12,7 @@ DEPRIV := ../../../virt/depriv
+ #depriv-y	+= $(DERPIV)/depriv_main.o
+ #depriv-y	+= x86.o
+ 
+-depriv-intel-y	+= vmx/depriv.o vmx/depriv_entry.o vmx/depriv_handler.o vmx/depriv_validator.o
++depriv-intel-y	+= x86.o vmx/depriv.o vmx/depriv_entry.o vmx/depriv_handler.o vmx/depriv_validator.o
+ 
+ #obj-$(CONFIG_DEPRIV)		+= depriv.o
+ obj-$(CONFIG_DEPRIV_INTEL)	+= depriv-intel.o
+diff --git a/arch/x86/depriv/depriv.h b/arch/x86/depriv/depriv.h
+deleted file mode 100644
+index a7f46fec40d5..000000000000
+--- a/arch/x86/depriv/depriv.h
++++ /dev/null
+@@ -1,10 +0,0 @@
+-/* SPDX-License-Identifier: GPL-2.0 */
+-#ifndef _X86_VMX_DEPRIV_H
+-#define _X86_VMX_DEPRIV_H
+-
+-void __init vmx_depriv_host(void);
+-void vmx_depriv_signal_cleanup(void);
+-void vmx_repriv_cpu(void *info);
+-void vmx_repriv_host(void);
+-
+-#endif /* _X86_VMX_DEPRIV_H */
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 3e47900eff3f..85c73469d798 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -1067,7 +1067,7 @@ static void vmx_repriv_cpu(void *info)
+ static void vmx_depriv_debug_with_non_root_mode(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	unsigned long gdt_base = vmcs_readl(HOST_GDTR_BASE), base;
++	unsigned long gdt_base = vmcs_readl(HOST_GDTR_BASE), base, rsp;
+ 	struct desc_struct *dentry;
+ 	u16 seg;
+ 	bool is_segment = true;
+@@ -1088,12 +1088,35 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ 	vmcs_writel(GUEST_CR3, __read_cr3());
+ 	vmcs_writel(GUEST_GS_BASE, vmcs_readl(HOST_GS_BASE));
+ 
+-	vmcs_write32(CR3_TARGET_COUNT, 0);
++	vmcs_write32(CR3_TARGET_COUNT, DEPRIV_INVALID_HOST_CR3_TARGET_COUNT);
+ 	vmcs_write32(GUEST_TR_AR_BYTES,
+ 		     vmcs_read32(GUEST_TR_AR_BYTES) & ~VMX_AR_S_MASK);
+ 
+-	pr_info("depriv: cpu%d switching to \"root mode\" GS base %#lx kernel GS base %#lx\n",
++	pr_info("depriv: cpu%d switching to \"root mode\" with rip %#lx rsp %#lx "
++		"GS base %#lx kernel GS base %#lx\n",
++		cpu, vmcs_readl(GUEST_RIP), vmcs_readl(GUEST_RSP),
++		vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
++	pr_info("depriv: cpu%d switching to \"root mode\" with GS base %#lx kernel GS base %#lx\n",
++		cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
++
++	asm volatile("mov %%rsp,%0" : "=m"(rsp));
++	pr_info("depriv: cpu%d rsp: %#lx in vmx_depriv_debug_with_non_root_mode\n", cpu, rsp);
++}
++
++void vmx_resume_fail(void)
++{
++	int cpu = raw_smp_processor_id();
++	unsigned long rsp;
++
++	pr_err("depriv: resume failed");
++
++	asm volatile("mov %%rsp,%0" : "=m"(rsp));
++	pr_info("depriv: cpu%d rsp: %#lx\n", cpu, rsp);
++
++	pr_info("depriv: cpu%d switching to \"root mode\" with GS base %#lx kernel GS base %#lx\n",
+ 		cpu, vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
++	pr_info("depriv: cpu%d switching to \"root mode\" with GS base %#lx kernel GS base %#lx\n",
++		cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ }
+ 
+ /*
+@@ -1102,7 +1125,7 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ bool vmx_repriv_cpu_state(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	unsigned long stack = depriv_iret_trampoline_stack(cpu);
++	unsigned long stack = depriv_iret_trampoline_stack(cpu), rsp;
+ 	unsigned long cr3 = vmcs_readl(GUEST_CR3);
+ 	unsigned long trampoline_cr3_pa = cr3 & CR3_ADDR_MASK;
+ 
+@@ -1129,6 +1152,9 @@ bool vmx_repriv_cpu_state(void)
+ 	vmx_repriv_cpu_sysenter_msrs();
+ 	vmx_repriv_cpu_desc_tables();
+ 
++	asm volatile("mov %%rsp,%0" : "=m"(rsp));
++	pr_info("depriv: cpu%d rsp: %#lx in vmx_repriv_cpu_state\n", cpu, rsp);
++
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(stack);
+ 
+ 	/* prepare for swapgs in asm_depriv_exit */
+@@ -1143,7 +1169,7 @@ bool vmx_repriv_cpu_state(void)
+ 	}
+ 
+ 	if (depriv_exiting) {
+-		pr_info("depriv: cpu%d switching to root mode GS base %#lx kernel GS base %#lx\n",
++		pr_info("depriv: cpu%d switching to root mode with GS base %#lx kernel GS base %#lx\n",
+ 			cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ 		vmx_repriv_cpu_release_resources();
+ 	}
+diff --git a/arch/x86/depriv/vmx/depriv_entry.S b/arch/x86/depriv/vmx/depriv_entry.S
+index ee937e107b54..4a16b6157c75 100644
+--- a/arch/x86/depriv/vmx/depriv_entry.S
++++ b/arch/x86/depriv/vmx/depriv_entry.S
+@@ -78,7 +78,12 @@ SYM_CODE_START(vmx_depriv_switch_to_root_mode)
+ 
+ 	je asm_depriv_exit
+ 	vmresume
+-	/* XXX what if vmresume fails? */
++
++	call vmx_resume_fail
++	/*
++	 * VM resume failed, forced to switch to root mode with guest stack
++	 */
++	jmp asm_depriv_exit
+ SYM_CODE_END(vmx_depriv_switch_to_root_mode)
+ 
+ SYM_FUNC_START(asm_vmx_depriv)
+diff --git a/arch/x86/depriv/vmx/vmx.h b/arch/x86/depriv/vmx/vmx.h
+index 9e374e3a1912..e34f5cf1074b 100644
+--- a/arch/x86/depriv/vmx/vmx.h
++++ b/arch/x86/depriv/vmx/vmx.h
+@@ -6,6 +6,7 @@
+ #include <linux/list.h>
+ 
+ #include <asm/bug.h>
++#include <asm/depriv.h>
+ #include <asm/page.h>
+ #include <asm/vmx.h>
+ 
+diff --git a/arch/x86/depriv/x86.c b/arch/x86/depriv/x86.c
+index 1683650ddadd..a5880f5e931b 100644
+--- a/arch/x86/depriv/x86.c
++++ b/arch/x86/depriv/x86.c
+@@ -1,9 +1,36 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+- * Deprivilege is to run Linux kernel in VMX non-root mode
++ * Deprivilege is to run Linux in hardware guest mode whenever possible
+  *
+  * Authors:
+  * 	Xin Li <fantry@gmail.com>
+  */
+ 
+-//MODULE_LICENSE("GPL");
++#include <linux/sched.h>
++
++#include <asm/depriv.h>
++#include <asm/percpu.h>
++
++DEFINE_PER_CPU(void *, depriv_cpu_state) = NULL;
++EXPORT_PER_CPU_SYMBOL(depriv_cpu_state);
++
++struct depriv_ops depriv_ops = {
++	.enter = NULL,
++	.exit = NULL,
++};
++
++/*
++ * WARNING: must be called with interrupt disabled!
++ */
++void depriv_switch(struct task_struct *prev, struct task_struct *next)
++{
++	int cpu = smp_processor_id();
++
++	if (!per_cpu(depriv_cpu_state, cpu))
++		return;
++
++	if (depriv_ops.exit)
++		depriv_ops.exit();
++	if (depriv_ops.enter)
++		depriv_ops.enter();
++}
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 74046a34e447..4b192f841d51 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -234,6 +234,11 @@ SYM_FUNC_START(__switch_to_asm)
+ 	pushq	%r14
+ 	pushq	%r15
+ 
++#ifdef CONFIG_DEPRIV
++	/* %rdi is prev and %rsi is next */
++	call depriv_switch
++#endif
++
+ 	/* switch stack */
+ 	movq	%rsp, TASK_threadsp(%rdi)
+ 	movq	TASK_threadsp(%rsi), %rsp
+diff --git a/arch/x86/include/asm/depriv.h b/arch/x86/include/asm/depriv.h
+index 4c539f1a8581..04d2d64db145 100644
+--- a/arch/x86/include/asm/depriv.h
++++ b/arch/x86/include/asm/depriv.h
+@@ -2,47 +2,12 @@
+ #ifndef _ASM_X86_DEPRIV_H
+ #define _ASM_X86_DEPRIV_H
+ 
++#include <linux/depriv.h>
++
+ #include <asm/percpu.h>
+ 
+ DECLARE_PER_CPU(void *, depriv_cpu_state);
+ 
+ extern asmlinkage void asm_depriv_exit(void);
+ 
+-struct depriv_ops {
+-	bool (*enter)(void);
+-	void (*exit)(void);
+-};
+-
+-extern struct depriv_ops depriv_ops;
+-
+-/*
+- * WARNING: must be called with interrupt disabled!
+- */
+-static inline void depriv_enter(void)
+-{
+-	int cpu = smp_processor_id();
+-	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+-
+-	if (!host_cpu_state)
+-		return;
+-
+-	if (depriv_ops.enter)
+-		depriv_ops.enter();
+-}
+-
+-/*
+- * WARNING: must be called with interrupt disabled!
+- */
+-static inline void depriv_exit(void)
+-{
+-	int cpu = smp_processor_id();
+-	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+-
+-	if (!host_cpu_state)
+-		return;
+-
+-	if (depriv_ops.exit)
+-		depriv_ops.exit();
+-}
+-
+ #endif /* _ASM_X86_DEPRIV_H */
+diff --git a/arch/x86/include/asm/switch_to.h b/arch/x86/include/asm/switch_to.h
+index 3b813609c2a3..b5f0d2ff47e4 100644
+--- a/arch/x86/include/asm/switch_to.h
++++ b/arch/x86/include/asm/switch_to.h
+@@ -3,7 +3,6 @@
+ #define _ASM_X86_SWITCH_TO_H
+ 
+ #include <linux/sched/task_stack.h>
+-#include <asm/depriv.h>
+ 
+ struct task_struct; /* one of the stranger aspects of C forward declarations */
+ 
+@@ -47,8 +46,6 @@ struct fork_frame {
+ 
+ #define switch_to(prev, next, last)					\
+ do {									\
+-	depriv_exit();							\
+-	depriv_enter();							\
+ 	((last) = __switch_to_asm((prev), (next)));			\
+ } while (0)
+ 
+diff --git a/include/linux/depriv.h b/include/linux/depriv.h
+new file mode 100644
+index 000000000000..389325138f41
+--- /dev/null
++++ b/include/linux/depriv.h
+@@ -0,0 +1,12 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _DEPRIV_H
++#define _DEPRIV_H
++
++struct depriv_ops {
++	bool (*enter)(void);
++	void (*exit)(void);
++};
++
++extern struct depriv_ops depriv_ops;
++
++#endif /* _DEPRIV_H */
+-- 
+2.34.1
+

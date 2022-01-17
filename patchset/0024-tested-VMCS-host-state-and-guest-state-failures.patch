@@ -1,0 +1,284 @@
+From 26ed2561fba0588aa7e1db9e47af1be42832da21 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 14 Jun 2020 00:12:01 -0700
+Subject: [PATCH 024/140] tested VMCS host state and guest state failures
+
+---
+ arch/x86/entry/entry_64.S |  8 ++--
+ arch/x86/kvm/vmx/depriv.c | 97 +++++++++++++++++++++------------------
+ 2 files changed, 56 insertions(+), 49 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 2d328db979d1..21247bb246ea 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1415,9 +1415,9 @@ nmi_restore:
+ SYM_CODE_END(asm_exc_nmi)
+ 
+ SYM_CODE_START(depriv_continue_in_root_mode)
+-	push	%rax
+-	push	%rcx
+ 	push	%rdx
++	push	%rcx
++	push	%rax
+ 
+ 	/*
+ 	 * switch to guest CR3
+@@ -1433,9 +1433,9 @@ SYM_CODE_START(depriv_continue_in_root_mode)
+ 	movl	0x4c(%rsp), %edx
+ 	wrmsr
+ 
+-	pop	%rdx
+-	pop	%rcx
+ 	pop	%rax
++	pop	%rcx
++	pop	%rdx
+ 	iretq
+ SYM_CODE_END(depriv_continue_in_root_mode)
+ EXPORT_SYMBOL(depriv_continue_in_root_mode)
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 262902235702..ec71a0061bba 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -688,9 +688,6 @@ static void __init vmx_depriv_cpu_crs(void)
+ 		vmcs_write64(GUEST_IA32_PERF_GLOBAL_CTRL, perf_global_ctrl);
+ 		vmcs_write64(HOST_IA32_PERF_GLOBAL_CTRL, perf_global_ctrl);
+ 	}
+-
+-	if (false) // true: test code path handling vmlaunch caused VM-entry fail
+-		vmcs_write32(CR3_TARGET_COUNT, 0x100000);
+ }
+ 
+ static inline bool __init is_desc_16byte(struct desc_struct *dentry)
+@@ -942,7 +939,7 @@ static void vmx_repriv_cpu_release_resources(void)
+ }
+ 
+ void vmx_depriv_vmexit(void);
+-int vmx_depriv(unsigned long root_rsp);
++int vmx_depriv(unsigned long host_rsp);
+ void vmx_depriv_rip(void);
+ void vmx_depriv_vmcall(void);
+ 
+@@ -980,14 +977,14 @@ static void vmx_depriv_cpu_intercept_msr(u32 msr, bool enable)
+ }
+ 
+ #define DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ip_off) do {			\
+-	*(unsigned long *)(root_rsp + 0x0) = rip + (ip_off);			\
+-	*(unsigned long *)(root_rsp + 0x8) = vmcs_read16(GUEST_CS_SELECTOR);	\
+-	*(unsigned long *)(root_rsp + 0x10) = vmcs_readl(GUEST_RFLAGS);		\
+-	*(unsigned long *)(root_rsp + 0x18) = vmcs_readl(GUEST_RSP);		\
+-	*(unsigned long *)(root_rsp + 0x20) = vmcs_read16(GUEST_SS_SELECTOR);	\
+-	*(unsigned long *)(root_rsp + 0x28) = vmcs_readl(GUEST_CR3);		\
+-	*(unsigned long *)(root_rsp + 0x30) = vmcs_readl(GUEST_GS_BASE);	\
+-	*(unsigned long *)(root_rsp + 0x38) = vmcs_readl(GUEST_FS_BASE);	\
++	*(unsigned long *)(host_rsp + 0x0) = rip + (ip_off);			\
++	*(unsigned long *)(host_rsp + 0x8) = vmcs_read16(GUEST_CS_SELECTOR);	\
++	*(unsigned long *)(host_rsp + 0x10) = vmcs_readl(GUEST_RFLAGS);		\
++	*(unsigned long *)(host_rsp + 0x18) = vmcs_readl(GUEST_RSP);		\
++	*(unsigned long *)(host_rsp + 0x20) = vmcs_read16(GUEST_SS_SELECTOR);	\
++	*(unsigned long *)(host_rsp + 0x28) = vmcs_readl(GUEST_CR3);		\
++	*(unsigned long *)(host_rsp + 0x30) = vmcs_readl(GUEST_GS_BASE);	\
++	*(unsigned long *)(host_rsp + 0x38) = vmcs_readl(GUEST_FS_BASE);	\
+ } while (0)
+ 
+ static void __init vmx_depriv_cpu(void *info)
+@@ -998,7 +995,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 	struct page *page = NULL;
+ 	void *host_cpu_state = NULL;
+ 	void *msr_bitmap = NULL;
+-	unsigned long root_rsp, rip, rsp, rflags;
++	unsigned long host_rsp, rip, rsp, rflags;
+ 	int vmx_depriv_result;
+ 
+ 	if (!(depriv_vmcs_conf.cpu_based_exec_ctrl & CPU_BASED_USE_MSR_BITMAPS)) {
+@@ -1041,8 +1038,8 @@ static void __init vmx_depriv_cpu(void *info)
+ 
+ 	vmcs_writel(HOST_RIP, (unsigned long)vmx_depriv_vmexit);
+ 	// reserve extra DEPRIV_HOST_STACK_RESERVED_BYTES bytes for reprivileging host
+-	root_rsp = (unsigned long)msr_bitmap - DEPRIV_HOST_STACK_RESERVED_BYTES;
+-	vmcs_writel(HOST_RSP, root_rsp);
++	host_rsp = (unsigned long)msr_bitmap - DEPRIV_HOST_STACK_RESERVED_BYTES;
++	vmcs_writel(HOST_RSP, host_rsp);
+ 
+ 	/* switching to non-root mode */
+ 	rip = (unsigned long)vmx_depriv_rip;
+@@ -1061,17 +1058,20 @@ static void __init vmx_depriv_cpu(void *info)
+ 
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(0);
+ 
+-	pr_info("depriv: deprivileging cpu%d: rip=%#lx rsp=%#lx\n",
++	pr_info("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n",
+ 		cpu, rip, rsp);
+ 
+-	if (false) // true: test code path handling vmresume caused VM-entry fail
++	if (false) // true: test code path handling vmlaunch failure
++		vmcs_write32(CR3_TARGET_COUNT, 0x100000);
++
++	if (false) // true: test code path handling vmexit on VM launch failure
+ 		vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
+ 
+ 	/*
+ 	 * Should we save/restore general purpose registers around vmx_depriv?
+ 	 * Yes, but only restore them when there was a successful vmentry.
+ 	 */
+-	vmx_depriv_result = vmx_depriv(root_rsp);
++	vmx_depriv_result = vmx_depriv(host_rsp);
+ 	if (!vmx_depriv_result) {
+ 		// continue in non-root mode...
+ 		asm volatile("mov %%rsp,%0" : "=m"(rsp));
+@@ -1092,9 +1092,12 @@ static void __init vmx_depriv_cpu(void *info)
+ 
+ 	// still in root mode
+ 	if (vmx_depriv_result == 1)
+-		pr_err("depriv: launch failed on cpu%d\n", cpu);
++		pr_err("depriv: cpu%d launch failed\n", cpu);
+ 	else if (vmx_depriv_result == 2)
+-		pr_err("depriv: resume failed on cpu%d\n", cpu);
++		pr_err("depriv: cpu%d resume failed\n", cpu);
++	else
++		pr_err("depriv: cpu%d unknown deprivilege error %d\n",
++		       cpu, vmx_depriv_result);
+ 
+ error:
+ 	vmx_repriv_cpu_release_resources();
+@@ -1291,7 +1294,6 @@ static void vmx_repriv_cpu_state(void)
+ 
+ #define DEPRIV_CONTINUE_IN_ROOT_MODE(ins_len) do {				\
+ 	vmx_repriv_cpu_state();							\
+-	dump_vmcs();								\
+ 	pr_info("depriv: cpu%d exit reason %d skip %d bytes instruction and "	\
+ 		"continue in root mode\n",					\
+ 		cpu, reason, ins_len);						\
+@@ -1332,32 +1334,32 @@ static void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ 	insn[3 * i] = '\0';
+ }
+ 
+-static unsigned long cnt = 0;
+-
+ /*
+  * the following fs base sync logic is confusing, but it happens on nested
+  */
+-static void dump_fsgs_base(unsigned long root_rsp)
++static void dump_fsgs_base(unsigned long host_rsp)
+ {
++	unsigned long *cnt = (unsigned long *)(host_rsp + 0x40);
+ 	int cpu = smp_processor_id();
+ 	unsigned long base, last_base;
+ 
+ 	base = vmcs_readl(GUEST_FS_BASE);
+-	last_base = *(unsigned long *)(root_rsp + 0x38);
++	last_base = *(unsigned long *)(host_rsp + 0x38);
+ 	if (base != last_base)
+ 		pr_info("depriv: cpu%d (%ld) FS base %#lx <= %#lx\n",
+-			cpu, cnt, base, last_base);
++			cpu, *cnt, base, last_base);
+ 
+ 	base = vmcs_readl(GUEST_GS_BASE);
+-	last_base = *(unsigned long *)(root_rsp + 0x30);
++	last_base = *(unsigned long *)(host_rsp + 0x30);
+ 	if (base != last_base)
+ 		pr_info("depriv: cpu%d (%ld) GS base %#lx <= %#lx\n",
+-			cpu, cnt, base, last_base);
++			cpu, *cnt, base, last_base);
+ }
+ 
+ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ {
+-	unsigned long root_rsp = vmcs_readl(HOST_RSP);
++	unsigned long host_rsp = vmcs_readl(HOST_RSP);
++	unsigned long *cnt = (unsigned long *)(host_rsp + 0x40);
+ 	unsigned long rip = vmcs_readl(GUEST_RIP);
+ 	unsigned long rsp = vmcs_readl(GUEST_RSP);
+ 	char insn[64];
+@@ -1365,26 +1367,32 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	u32 reason = vmcs_read32(VM_EXIT_REASON), insn_len = 0;
+ 	static bool enable_log = false;
+ 
+-	++cnt;
+-
+ 	regs[__VCPU_REGS_RSP] = rsp;
+ 
+-	dump_fsgs_base(root_rsp);
++	if (reason & VMX_EXIT_REASONS_FAILED_VMENTRY) {
++		pr_err("depriv: cpu%d (%ld) VM-entry failed @ rip: %#lx rsp: %#lx\n",
++		       cpu, *cnt, rip, rsp);
++		reason &= ~VMX_EXIT_REASONS_FAILED_VMENTRY;
++
++		if (rip == (unsigned long)vmx_depriv_rip)
++			regs[__VCPU_REGS_RAX] = 2;
++
++		vmx_check_guest_state();
++		DEPRIV_CONTINUE_IN_ROOT_MODE(0);
++	}
++
++	(*cnt)++;
++
++	dump_fsgs_base(host_rsp);
+ 
+ 	pr_debug("depriv: cpu%d exit reason:%#x rip:%#lx rsp:%#lx\n",
+ 		 cpu, reason, rip, rsp);
+ 	if (enable_log) {
+ 		pr_info("depriv: cpu%d (%ld) exit reason:%#x rip:%#lx rsp:%#lx\n",
+-			cpu, cnt, reason, rip, rsp);
++			cpu, *cnt, reason, rip, rsp);
+ 		enable_log = false;
+ 	}
+ 
+-	if (reason & VMX_EXIT_REASONS_FAILED_VMENTRY) {
+-		dump_vmcs();
+-		vmx_check_guest_state();
+-		// no need to sync guest state to host if we never enter guest
+-		DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+-	}
+ 
+ 	switch (reason) {
+ 	case EXIT_REASON_EXCEPTION_NMI: {
+@@ -1438,16 +1446,15 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 				cpu, vector);
+ 
+ 			pr_info("depriv: cpu%d (%ld) FS base %#lx : %#lx : %#lx\n",
+-				cpu, cnt, read_msr(MSR_FS_BASE),
++				cpu, *cnt, read_msr(MSR_FS_BASE),
+ 				vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
+ 
+ 			pr_info("depriv: cpu%d (%ld) GS base %#lx : %#lx : %#lx : %#lx\n",
+-				cpu, cnt, read_msr(MSR_GS_BASE), vmcs_readl(HOST_GS_BASE),
++				cpu, *cnt, read_msr(MSR_GS_BASE), vmcs_readl(HOST_GS_BASE),
+ 				vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ 
+ 			DEPRIV_DUMP_GPRS;
+ 			enable_log = true;
+-			//dump_vmcs();
+ 			vmx_check_guest_state();
+ 
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(0);
+@@ -1567,7 +1574,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		pr_info("depriv: cpu%d msr[%#x]: %#lx\n", cpu, ecx, val);
+ #if 1
+ 		pr_info("depriv: cpu%d (%ld) FS base %#lx : %#lx : %#lx\n",
+-			cpu, cnt, read_msr(MSR_FS_BASE),
++			cpu, *cnt, read_msr(MSR_FS_BASE),
+ 			vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
+ #endif
+ 		if (ecx == 0x3b) {
+@@ -1613,7 +1620,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		case MSR_FS_BASE:
+ #if 0
+ 			pr_info("depriv: cpu%d (%ld) before write FS base %#lx : %#lx : %#lx\n",
+-				cpu, cnt, read_msr(MSR_FS_BASE),
++				cpu, *cnt, read_msr(MSR_FS_BASE),
+ 				vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
+ #endif
+ 			//pr_info("depriv: cpu%d FS base MSR = %#lx\n", cpu, val);
+@@ -1629,7 +1636,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			vmcs_writel(HOST_FS_BASE, val);
+ #if 0
+ 			pr_info("depriv: cpu%d (%ld) after write FS base %#lx : %#lx : %#lx\n",
+-				cpu, cnt, read_msr(MSR_FS_BASE),
++				cpu, *cnt, read_msr(MSR_FS_BASE),
+ 				vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
+ #endif
+ 			break;
+-- 
+2.34.1
+

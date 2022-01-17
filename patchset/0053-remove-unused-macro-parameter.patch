@@ -1,0 +1,47 @@
+From d35928d6c2e1ecb301d3d0f9ef93df72dd99be56 Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Wed, 17 Jun 2020 17:28:39 -0700
+Subject: [PATCH 053/140] remove unused macro parameter
+
+---
+ arch/x86/kvm/vmx/depriv.c | 15 +++++++--------
+ 1 file changed, 7 insertions(+), 8 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 830388e57251..01635ac7a38c 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -781,10 +781,9 @@ static inline u32 __init get_desc_ar(struct desc_struct *dentry,
+ 		     get_desc_ar(dentry, sel == 0, is_segment));		\
+ }
+ 
+-#define DEPRIV_SEGMENT(SEG, fix_null_selector) {				\
++#define DEPRIV_SEGMENT(SEG) {							\
+ 	u16 seg;								\
+ 	savesegment(SEG, seg);							\
+-	if (fix_null_selector && seg == 0) seg = __KERNEL_DS;			\
+ 	vmcs_write16(HOST_##SEG##_SELECTOR, seg);				\
+ 	DEPRIV_SELECTOR(SEG, seg);						\
+ }
+@@ -796,12 +795,12 @@ static void __init vmx_depriv_cpu_segments(unsigned long gdt_base)
+ 	unsigned long base;
+ 	bool is_segment = true;
+ 
+-	DEPRIV_SEGMENT(CS, false);
+-	DEPRIV_SEGMENT(DS, false);
+-	DEPRIV_SEGMENT(ES, false);
+-	DEPRIV_SEGMENT(SS, false);
+-	DEPRIV_SEGMENT(FS, false);
+-	DEPRIV_SEGMENT(GS, false);
++	DEPRIV_SEGMENT(CS);
++	DEPRIV_SEGMENT(DS);
++	DEPRIV_SEGMENT(ES);
++	DEPRIV_SEGMENT(SS);
++	DEPRIV_SEGMENT(FS);
++	DEPRIV_SEGMENT(GS);
+ 
+ 	base = read_msr(MSR_FS_BASE);
+ 	pr_debug("depriv: cpu%d FS base MSR %#lx\n", cpu, base);
+-- 
+2.34.1
+

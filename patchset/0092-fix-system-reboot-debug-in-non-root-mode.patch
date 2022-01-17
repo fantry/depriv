@@ -1,0 +1,105 @@
+From 21d3a2c8f97cf42a88058ba12acbe23d1ddac081 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 23 Jun 2020 14:30:51 -0700
+Subject: [PATCH 092/140] fix system reboot debug in non root mode
+
+---
+ arch/x86/kvm/vmx/depriv.c       | 13 +++++++------
+ arch/x86/kvm/vmx/depriv_entry.S | 21 ++++++++++++---------
+ 2 files changed, 19 insertions(+), 15 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index f9e30a5453aa..92bf83fb26eb 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -780,15 +780,15 @@ void vmx_repriv_cpu(void *info)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+-	int *to_root_mode = NULL;
++	unsigned long *to_root_mode = NULL;
+ 
+ 	if (!host_cpu_state)
+ 		return;
+ 
+-	to_root_mode = (int *)(host_cpu_state +
+-			       DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
+-			       DEPRIV_HOST_STACK_RESERVED_BYTES +
+-			       DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE);
++	to_root_mode = (unsigned long *)(host_cpu_state +
++					 DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
++					 DEPRIV_HOST_STACK_RESERVED_BYTES +
++					 DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE);
+ 
+ 	++(*to_root_mode);
+ 
+@@ -975,10 +975,11 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	}
+ 
+ 	case EXIT_REASON_VMCALL: {
+-		int *to_root_mode = (int *)(host_rsp + DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE);
++		unsigned long *to_root_mode;
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
++		to_root_mode = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE);
+ 		if (*to_root_mode) {
+ 			pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, switch to root mode\n",
+ 				cpu, counter, rip);
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index acba5d3c60f9..6ba9ef271da2 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -68,16 +68,18 @@ SYM_CODE_START(vmx_depriv_switch_to_root_mode)
+ 
+ 	POP_ALL
+ 
+-	/*
+-	 * upon vmx_repriv_cpu_state returning true, %rax = 1
+-	 * upon vmx_repriv_cpu_state returning false, %rax = 0
+-	 */
+-	mov	%rax, 0x8(%rsp)
++	/* set %rax upon vmx_repriv_cpu_state's return value */
++	push %rax
++	mov $1, %rax
++	je 1f
++	mov $0, %rax
++1:	mov %rax, 0x10(%rsp)
++	pop %rax
+ 
+ 	/*
+ 	 * switch to iret stack, which is mapped even in user space CR3
+ 	 */
+-	mov	0x10(%rsp), %rsp
++	mov 0x10(%rsp), %rsp
+ 
+ 	je depriv_switch_to_root_mode
+ 	vmresume
+@@ -86,13 +88,13 @@ SYM_CODE_END(vmx_depriv_switch_to_root_mode)
+ 
+ SYM_FUNC_START(vmx_depriv)
+ 	/* assuming vmlaunch will succeed */
+-	xor %eax, %eax
++	xor %rax, %rax
+ 	/* Enter non-root mode */
+ 	vmlaunch
+ 
+ 	/* vmlaunch failed, switch to root mode stask */
+-	xor %eax, %eax
+-	mov $1, %eax
++	xor %rax, %rax
++	mov $1, %rax
+ 	ret
+ SYM_FUNC_END(vmx_depriv)
+ 
+@@ -116,6 +118,7 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	mov %rsp, %_ASM_ARG1
+ 	call vmx_depriv_vmexit_handler
+ 	cmpb $1, %al
++
+ 	POP_ALL
+ 
+ 	/*
+-- 
+2.34.1
+

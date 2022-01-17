@@ -1,0 +1,36 @@
+From 8dccbdefa8b458dfc44da1f98a7ad60576b17126 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 3 Feb 2021 00:27:17 -0800
+Subject: [PATCH 135/140] print process name which is making a vmcall
+
+---
+ arch/x86/depriv/vmx/depriv.c | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 45f651f45fa5..bfe208553bbc 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -441,6 +441,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	case EXIT_REASON_VMCALL: {
+ 		long call_no = regs[__VCPU_REGS_RDI];
+ 		void *info = (void *)regs[__VCPU_REGS_RSI];
++		char comm[sizeof(current->comm)];
+ 
+ 		pr_debug("depriv: cpu%d (%ld) exit reason: %d cpu depriv mode mask: %*pb[l]\n",
+ 			 cpu, counter, reason, cpumask_pr_args(&cpu_depriv_mode_mask));
+@@ -461,8 +462,9 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 			break;
+ 		default:
+-			pr_err("depriv: cpu%d (%ld) invalid vmcall no %ld @ %#lx\n",
+-			       cpu, counter, call_no, rip);
++			get_task_comm(comm, current);
++			pr_err("depriv: cpu%d (%ld) invalid vmcall no %ld @ %#lx in task %s\n",
++			       cpu, counter, call_no, rip, comm);
+ 			DEPRIV_DUMP_GPRS(regs);
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 			break;
+-- 
+2.34.1
+

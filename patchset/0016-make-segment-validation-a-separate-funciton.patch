@@ -1,0 +1,463 @@
+From b7a64dd61c8117ee42221b759fe8cea02daeaaa6 Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Fri, 12 Jun 2020 19:24:10 -0700
+Subject: [PATCH 016/140] make segment validation a separate funciton
+
+---
+ arch/x86/kvm/vmx/vmx.c | 331 +++++++++++++++++++----------------------
+ 1 file changed, 153 insertions(+), 178 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 469f454477bd..d1d6de866cab 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -9346,10 +9346,13 @@ static int __init vmx_init(void)
+ module_init(vmx_init);
+ 
+ #if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV_HOST)
++static bool found_issue = false;
++
+ #define CHECK(_c) do {							\
+ 	if (!(_c)) {							\
+-		pr_err("VM-entry failure (%d): %s\n", __LINE__, #_c);	\
+-		root_caused = true;					\
++		pr_err("depriv: guest state check failed (%d): %s\n",	\
++		       __LINE__, #_c);					\
++		found_issue = true;					\
+ 	}								\
+ } while (0)
+ 
+@@ -9386,23 +9389,129 @@ module_init(vmx_init);
+ 
+ #define PAGE_M (PAGE_SIZE - 1)
+ 
++static void vmx_check_guest_segment(u8 s, bool vm86_active,
++				    bool long_mode_active, bool unrestricted)
++{
++	u16 selector = vmcs_read16(kvm_vmx_segment_fields[s].selector);
++	unsigned long base = vmcs_readl(kvm_vmx_segment_fields[s].base);
++	u32 limit = vmcs_read32(kvm_vmx_segment_fields[s].limit);
++	u32 ar = vmcs_read32(kvm_vmx_segment_fields[s].ar_bytes);
++	bool unusable = !!(ar & VMX_AR_UNUSABLE_MASK);
++	bool present = !!(ar & VMX_AR_P_MASK);
++	unsigned rpl = selector & SEGMENT_RPL_MASK;
++	unsigned ti = selector & SEGMENT_TI_MASK;
++	unsigned type = ar & VMX_AR_TYPE_MASK;
++	unsigned dpl = VMX_AR_DPL(ar);
++
++	if (unusable) {
++		pr_err("depriv: seg%d sel=0x%04x, attr=0x%05x, limit=0x%08x, base=0x%016lx\n",
++		       s, selector, ar, limit, base);
++		return;
++	}
++
++	if (s == VCPU_SREG_TR)
++		CHECK(ti == 0);
++	else if (s == VCPU_SREG_LDTR)
++		CHECK(!present || ti == 0);
++	else if (s == VCPU_SREG_SS)
++		CHECK(vm86_active ||
++		      unrestricted ||
++		      rpl == (vmcs_read16(GUEST_CS_SELECTOR) & SEGMENT_RPL_MASK));
++
++	if (s < VCPU_SREG_LDTR && vm86_active)
++		CHECK(base == (unsigned long)(selector << 4));
++	if (s == VCPU_SREG_TR || s == VCPU_SREG_FS || s == VCPU_SREG_GS)
++		CHECK_IS_GUEST_ADDR_CANONICAL(base);
++	else if (s == VCPU_SREG_LDTR)
++		CHECK(!present || is_canonical_address(base, vmcs_readl(GUEST_CR4)));
++	else if (s == VCPU_SREG_CS)
++		CHECK(!((u32)(base >> 32)));
++	else
++		CHECK(!present || !((u32)(base >> 32)));
++
++	if (s < VCPU_SREG_LDTR && vm86_active)
++		CHECK(limit == 0xffff);
++
++	if (s < VCPU_SREG_LDTR)
++		if (vm86_active)
++			CHECK(ar == 0xF3);
++		else {
++			// Type
++			if (s == VCPU_SREG_CS)
++				CHECK((unrestricted && type == 3) ||
++				      (type & 9) == 9);
++			else if (s == VCPU_SREG_SS)
++				CHECK(!present || type == 3 || type == 7);
++			else if (present)
++				CHECK((type & 1) == 1 &&
++				      ((type & 8) == 0 || (type & 2) == 2));
++			// S
++			if (s == VCPU_SREG_TR)
++				CHECK(!(ar & VMX_AR_S_MASK));
++			if (s != VCPU_SREG_TR && present) {
++				CHECK(ar & VMX_AR_S_MASK);
++			}
++			// DPL
++			if (s == VCPU_SREG_CS)
++				if (type == 3) /* data segment => real mode */
++					CHECK(dpl == 0);
++				else if ((type & 4) == 0) /* non-conforming code segment */
++					CHECK(dpl == VMX_AR_DPL(vmcs_read32(GUEST_SS_AR_BYTES)));
++				else /* conforming code segment */
++					CHECK(dpl <= VMX_AR_DPL(vmcs_read32(GUEST_SS_AR_BYTES)));
++			else if (s == VCPU_SREG_SS)
++				if (!(vmcs_readl(GUEST_CR0) & X86_CR0_PE) ||
++				    (vmcs_read32(GUEST_CS_AR_BYTES) & VMX_AR_TYPE_MASK) == 3)
++					CHECK(dpl == 0);
++				else
++					CHECK(dpl == rpl);
++			else if (!unrestricted && present && type <= 11)
++				/* not a conforming code segment */
++				CHECK(dpl >= rpl);
++			// P
++			if (s == VCPU_SREG_CS || present)
++				CHECK(present);
++			// reserved bits
++			if (s == VCPU_SREG_CS || present)
++				CHECK((ar & 0xfffe0f00) == 0);
++			// D/B
++			if (s == VCPU_SREG_CS)
++				CHECK(!long_mode_active || !(ar & VMX_AR_L_MASK) || !(ar & VMX_AR_DB_MASK));
++			// G
++			if (s == VCPU_SREG_CS || present) {
++				CHECK((limit & PAGE_M) == PAGE_M || !(ar & VMX_AR_G_MASK));
++				CHECK(limit >> 20 == 0 || ar & VMX_AR_G_MASK);
++			}
++		}
++	else if (s == VCPU_SREG_TR) {
++		CHECK((!long_mode_active && type == 3) || type == 11);
++		CHECK(!(ar & VMX_AR_S_MASK));
++		CHECK(present);
++		CHECK((ar & 0xfffe0f00) == 0);
++		CHECK((limit & PAGE_M) == PAGE_M || !(ar & VMX_AR_G_MASK));
++		CHECK(limit >> 20 == 0 || ar & VMX_AR_G_MASK);
++	} else if (s == VCPU_SREG_LDTR && present) {
++		CHECK(type == 2);
++		CHECK(!(ar & VMX_AR_S_MASK));
++		CHECK(present);
++		CHECK((ar & 0xfffe0f00) == 0);
++		CHECK((limit & PAGE_M) == PAGE_M || !(ar & VMX_AR_G_MASK));
++		CHECK(limit >> 20 == 0 || ar & VMX_AR_G_MASK);
++	}
++}
++
+ void vmx_check_guest_state(void)
+ {
+-	bool root_caused = false;
+ 	u32 vmentry_ctl = vmcs_read32(VM_ENTRY_CONTROLS);
+ 	u32 vmexit_ctl = vmcs_read32(VM_EXIT_CONTROLS);
+ 	u32 cpu_based_exec_ctrl = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);
+ 	u32 pin_based_exec_ctrl = vmcs_read32(PIN_BASED_VM_EXEC_CONTROL);
+ 	u32 secondary_exec_control = cpu_has_secondary_exec_ctrls() ?
+ 		vmcs_read32(SECONDARY_VM_EXEC_CONTROL) : 0;
+-	u32 exit_reason = vmcs_read32(VM_EXIT_REASON);
+-	u64 exit_qualification = vmcs_readl(EXIT_QUALIFICATION);
+ 	u64 rflags = vmcs_readl(GUEST_RFLAGS);
+ 	bool vm86_active = rflags & X86_EFLAGS_VM;
+-	bool longmode = vmentry_ctl & VM_ENTRY_IA32E_MODE;
+-
++	bool long_mode_active = vmentry_ctl & VM_ENTRY_IA32E_MODE;
+ 	u32 vmentry_intr_info = vmcs_read32(VM_ENTRY_INTR_INFO_FIELD);
+-
+ 	bool unrestricted = cpu_has_secondary_exec_ctrls() ?
+ 		secondary_exec_control & SECONDARY_EXEC_UNRESTRICTED_GUEST :
+ 		false;
+@@ -9416,23 +9525,15 @@ void vmx_check_guest_state(void)
+ 
+ 	u64 pin_based_ctrls = read_msr(MSR_IA32_VMX_TRUE_PINBASED_CTLS);
+ 	u64 proc_based_ctrls = read_msr(MSR_IA32_VMX_TRUE_PROCBASED_CTLS);
+-	u64 exit_ctrls = read_msr(MSR_IA32_VMX_TRUE_EXIT_CTLS);
+-	u64 entry_ctrls = read_msr(MSR_IA32_VMX_TRUE_ENTRY_CTLS);
+ 
+ 	u64 debug_ctrl = vmcs_read64(GUEST_IA32_DEBUGCTL);
+-	u64 link_ptr = vmcs_read64(VMCS_LINK_POINTER);
+ 	u32 activity_state = vmcs_read32(GUEST_ACTIVITY_STATE);
+ 	u32 interruptibility = vmcs_read32(GUEST_INTERRUPTIBILITY_INFO);
+ 	u64 pending_dbg_exceptions = vmcs_readl(GUEST_PENDING_DBG_EXCEPTIONS);
+ 
+ 	u8 s;
+ 
+-	// 26.4: Loading MSRs
+-	if (exit_reason == EXIT_REASON_MSR_LOAD_FAIL) {
+-		pr_err("VM-entry failure: bad item (%#llx) in MSR load area\n",
+-		       exit_qualification - 1);
+-		root_caused = true;
+-	}
++	found_issue = false;
+ 
+ 	// 26.2.1.1: VM-Execution Control Fields
+ 	CHECK_VMX_CTLS(pin_based_exec_ctrl, pin_based_ctrls);
+@@ -9454,44 +9555,44 @@ void vmx_check_guest_state(void)
+ 	CHECK(!(pin_based_exec_ctrl & PIN_BASED_POSTED_INTR));
+ 
+ 	// 26.2.1.2: VM-Exit Control Fields
+-	CHECK_VMX_CTLS(vmexit_ctl, exit_ctrls);
++	CHECK_VMX_CTLS(vmexit_ctl, read_msr(MSR_IA32_VMX_TRUE_EXIT_CTLS));
+ 	CHECK(pin_based_exec_ctrl & PIN_BASED_VMX_PREEMPTION_TIMER ||
+ 	      !(vmexit_ctl & VM_EXIT_SAVE_VMX_PREEMPTION_TIMER));
+ 
+ 	// 26.2.1.3: VM-Entry Control Fields
+-	CHECK_VMX_CTLS(vmentry_ctl, entry_ctrls);
++	CHECK_VMX_CTLS(vmentry_ctl, read_msr(MSR_IA32_VMX_TRUE_ENTRY_CTLS));
+ 	if (vmentry_intr_info & INTR_INFO_VALID_MASK) {
+ 		u32 type = vmentry_intr_info & INTR_INFO_INTR_TYPE_MASK;
+-		u32 vector = vmentry_intr_info & INTR_INFO_VECTOR_MASK;
+-		u32 instrLen = vmcs_read32(VM_ENTRY_INSTRUCTION_LEN);
++		u8 vector = vmentry_intr_info & INTR_INFO_VECTOR_MASK;
++		u32 insn_len = vmcs_read32(VM_ENTRY_INSTRUCTION_LEN);
+ 		bool has_error_code = vmentry_intr_info & INTR_INFO_DELIVER_CODE_MASK;
+ 
+-		CHECK(type != (0x1 << 8));
++		CHECK(type != INTR_TYPE_RESERVED);
+ 		CHECK((u32)(proc_based_ctrls >> 32) & CPU_BASED_MONITOR_TRAP_FLAG ||
+-		      type != (0x7 << 8));
+-		CHECK(type != (0x2 << 8) || vector == 2);
+-		CHECK(type != (0x3 << 8) || vector <= 31);
+-		CHECK(type != (0x7 << 8) || vector == 0);
+-
+-		CHECK(has_error_code == ((vmcs_readl(GUEST_CR0) & X86_CR0_PE) &&
+-					 (type == (0x3 << 8) &&
+-					  (vector == 8  ||
+-					   vector == 10 ||
+-					   vector == 11 ||
+-					   vector == 12 ||
+-					   vector == 13 ||
+-					   vector == 14 ||
+-					   vector == 17))));
++		      type != INTR_TYPE_OTHER_EVENT);
++		CHECK(type != INTR_TYPE_NMI_INTR || vector == BP_VECTOR);
++		CHECK(type != INTR_TYPE_HARD_EXCEPTION || vector <= 31);
++		CHECK(type != INTR_TYPE_OTHER_EVENT || vector == DE_VECTOR);
++
++		CHECK(has_error_code == (vmcs_readl(GUEST_CR0) & X86_CR0_PE &&
++					 (type == INTR_TYPE_HARD_EXCEPTION &&
++					  (vector == DF_VECTOR ||
++					   vector == TS_VECTOR ||
++					   vector == NP_VECTOR ||
++					   vector == SS_VECTOR ||
++					   vector == GP_VECTOR ||
++					   vector == PF_VECTOR ||
++					   vector == AC_VECTOR))));
+ 
+ 		CHECK(!(vmentry_intr_info &
+ 			(INTR_INFO_RESVD_BITS_MASK | INTR_INFO_UNBLOCK_NMI)));
+ 
+ 		CHECK(!has_error_code ||
+ 		      (vmcs_read32(VM_ENTRY_EXCEPTION_ERROR_CODE) & 0xffff8000) == 0);
+-		CHECK(!(type == (0x4 << 8) ||
+-			type == (0x5 << 8) ||
+-			type == (0x6 << 8)) ||
+-		      instrLen < MAX_INSN_SIZE);
++		CHECK(!(type == INTR_TYPE_SOFT_INTR ||
++			type == INTR_TYPE_PRIV_SW_EXCEPTION ||
++			type == INTR_TYPE_SOFT_EXCEPTION) ||
++		      insn_len < MAX_INSN_SIZE);
+ 	}
+ 
+ 	CHECK(!(vmentry_ctl & VM_ENTRY_SMM));
+@@ -9565,7 +9666,7 @@ void vmx_check_guest_state(void)
+ 		CHECK((debug_ctrl & debug_ctrl_reserved) == 0);
+ 	}
+ 
+-	CHECK(!longmode || vmcs_readl(GUEST_CR4) & X86_CR4_PAE);
++	CHECK(!long_mode_active || vmcs_readl(GUEST_CR4) & X86_CR4_PAE);
+ 
+ 	if (vmentry_ctl & VM_ENTRY_LOAD_DEBUG_CONTROLS)
+ 		CHECK(!((u32)(vmcs_readl(GUEST_DR7) >> 32)));
+@@ -9587,7 +9688,7 @@ void vmx_check_guest_state(void)
+ 		u64 efer = vmcs_read64(GUEST_IA32_EFER);
+ 		CHECK((efer & 0xffffffffffff0200ull) == 0);
+ 		if ((vmcs_readl(GUEST_CR0) & X86_CR0_PG) != 0) {
+-			if (longmode)
++			if (long_mode_active)
+ 				CHECK((efer & (EFER_LMA | EFER_LME)) ==
+ 				      (EFER_LMA | EFER_LME));
+ 			else
+@@ -9602,145 +9703,21 @@ void vmx_check_guest_state(void)
+ 	}
+ 
+ 	// 26.3.1.2: Checks on Guest Segment Registers
+-	for (s = VCPU_SREG_ES; s <= VCPU_SREG_LDTR; s++) {
+-		u16 selector = vmcs_read16(kvm_vmx_segment_fields[s].selector);
+-		unsigned long base = vmcs_readl(kvm_vmx_segment_fields[s].base);
+-		u32 limit = vmcs_read32(kvm_vmx_segment_fields[s].limit);
+-		u32 orig_ar = vmcs_read32(kvm_vmx_segment_fields[s].ar_bytes);
+-		u16 ar = orig_ar;
+-		bool unusable = orig_ar & VMX_AR_UNUSABLE_MASK;
+-		bool present = ar & VMX_AR_P_MASK;
+-		unsigned rpl = selector & SEGMENT_RPL_MASK;
+-		unsigned ti = selector & SEGMENT_TI_MASK;
+-		unsigned type = ar & VMX_AR_TYPE_MASK;
+-		unsigned dpl = VMX_AR_DPL(ar);
+-
+-		if (unusable) {
+-			pr_err("seg %d: sel=0x%04x, attr=0x%05x, limit=0x%08x, base=0x%016lx\n",
+-			       s, selector, orig_ar, limit, base);
+-			continue;
+-		}
+-
+-		if (s == VCPU_SREG_TR) {
+-			CHECK(ti == 0);
+-		} else if (s == VCPU_SREG_LDTR) {
+-			CHECK(!present || ti == 0);
+-		} else if (s == VCPU_SREG_SS) {
+-			CHECK(vm86_active ||
+-			      unrestricted ||
+-			      rpl == (vmcs_read16(GUEST_CS_SELECTOR) & 0x3));
+-		}
+-
+-		if (s < VCPU_SREG_LDTR && vm86_active) {
+-			CHECK(base == (unsigned long)(selector << 4));
+-		}
+-		if (s == VCPU_SREG_TR || s == VCPU_SREG_FS || s == VCPU_SREG_GS) {
+-			CHECK_IS_GUEST_ADDR_CANONICAL(base);
+-		} else if (s == VCPU_SREG_LDTR) {
+-			CHECK(!present || is_canonical_address(base, vmcs_readl(GUEST_CR4)));
+-		} else if (s == VCPU_SREG_CS) {
+-			CHECK(!((u32)(base >> 32)));
+-		} else {
+-			CHECK(!present || !((u32)(base >> 32)));
+-		}
+-
+-		if (s < VCPU_SREG_LDTR && vm86_active) {
+-			CHECK(limit == 0xffff);
+-		}
+-
+-		if (s < VCPU_SREG_LDTR) {
+-			if (vm86_active) {
+-				CHECK(ar == 0xF3);
+-			} else {
+-				// Bits 3:0 (Type).
+-				if (s == VCPU_SREG_CS) {
+-					CHECK((unrestricted && type == 3) ||
+-					      (type & 9) == 9); /* Must be code, accessed. */
+-				} else if (s == VCPU_SREG_SS) {
+-					/* If not a null selector, must be data, accessed, writable. */
+-					CHECK(!present || type == 3 || type == 7);
+-				} else if (present) {
+-					/* Must be accessed. Also must be data or writable. */
+-					CHECK((type & 1) == 1 &&
+-					      ((type & 8) == 0 || (type & 2) == 2));
+-				}
+-				// Bit 4 (S).
+-				if (s == VCPU_SREG_TR) {
+-					CHECK(!((ar >> 4) & 0x1));
+-				}
+-				if (s != VCPU_SREG_TR && present) {
+-					CHECK((ar >> 4) & 0x1);
+-				}
+-				// Bits 6:5 (DPL).
+-				if (s == VCPU_SREG_CS) {
+-					if (type == 3) {              /* Data segment => real mode. */
+-						CHECK(dpl == 0);
+-					} else if ((type & 4) == 0) { /* Non-conforming code segment. */
+-						CHECK(dpl == ((vmcs_read32(GUEST_SS_AR_BYTES) >> 5) & 0x3));
+-					} else {                      /* Conforming code segment. */
+-						CHECK(dpl <= ((vmcs_read32(GUEST_SS_AR_BYTES) >> 5) & 0x3));
+-					}
+-				} else if (s == VCPU_SREG_SS) {
+-					if ((vmcs_readl(GUEST_CR0) & X86_CR0_PE) == 0 ||
+-					    (vmcs_read32(GUEST_CS_AR_BYTES) & 0xf) == 3) {
+-						CHECK(dpl == 0);
+-					} else {
+-						CHECK(dpl == rpl);
+-					}
+-				} else if (!unrestricted && present && type <= 11) {
+-					/* Not a conforming code segment. */
+-					CHECK(dpl >= rpl);
+-				}
+-				// Bit 7 (P).
+-				if (s == VCPU_SREG_CS || present) {
+-					CHECK((ar >> 7) & 0x1);
+-				}
+-				// Bits 11:8, 31:17 (reserved).
+-				if (s == VCPU_SREG_CS || present) {
+-					CHECK((ar & 0xfffe0f00) == 0);
+-				}
+-				// Bit 14 (D/B).
+-				if (s == VCPU_SREG_CS) {
+-					CHECK(!longmode || !((ar >> 13) & 0x1) || ((ar >> 14) & 0x1) == 0);
+-				}
+-				// Bit 15 (G).
+-				if (s == VCPU_SREG_CS || present) {
+-					CHECK((limit & PAGE_M) == PAGE_M|| !((ar >> 15) & 0x1));
+-					CHECK(limit >> 20 == 0 || ((ar >> 15) & 0x1));
+-				}
+-			}
+-		} else if (s == VCPU_SREG_TR) {
+-			/* Must be 16-bit busy TSS if not in long mode or 32-bit busy TSS. */
+-			CHECK((!longmode && type == 3) || type == 11);
+-			CHECK(!((ar >> 4) & 0x1));
+-			CHECK((ar >> 7) & 0x1);
+-			CHECK((ar & 0xfffe0f00) == 0);
+-			CHECK((limit & PAGE_M) == PAGE_M|| !((ar >> 15) & 0x1));
+-			CHECK(limit >> 20 == 0 || ((ar >> 15) & 0x1));
+-			CHECK(present);
+-		} else if (s == VCPU_SREG_LDTR && present) {
+-			/* Must be a LDT selector. */
+-			CHECK(type == 2);
+-			CHECK(!((ar >> 4) & 0x1));
+-			CHECK((ar >> 7) & 0x1);
+-			CHECK((ar & 0xfffe0f00) == 0);
+-			CHECK((limit & PAGE_M) == PAGE_M|| !((ar >> 15) & 0x1));
+-			CHECK(limit >> 20 == 0 || ((ar >> 15) & 0x1));
+-		}
+-	}
++	for (s = VCPU_SREG_ES; s <= VCPU_SREG_LDTR; s++)
++		vmx_check_guest_segment(s, vm86_active, long_mode_active, unrestricted);
+ 
+ 	// 26.3.1.3: Checks on Guest Descriptor-Table Registers
+ 	CHECK_IS_GUEST_TABLE_BASE_CANONICAL(GDTR);
+ 	CHECK_IS_GUEST_TABLE_BASE_CANONICAL(IDTR);
+ 
+ 	// 26.3.1.4: Checks on Guest RIP and RFLAGS
+-	CHECK((longmode && ((vmcs_read32(kvm_vmx_segment_fields[VCPU_SREG_CS].ar_bytes) >> 13) & 0x1)) ||
++	CHECK((long_mode_active && vmcs_read32(kvm_vmx_segment_fields[VCPU_SREG_CS].ar_bytes) & VMX_AR_L_MASK) ||
+ 	      (u32)(vmcs_readl(GUEST_RIP) >> 32) == 0);
+ 	CHECK_IS_GUEST_VMCS_FIELD_ADDR_CANONICAL(RIP);
+ 
+ 	CHECK((rflags & ((-1ull << 22) | (1 << 15) | (1 << 5) | (1 << 3))) == 0);
+ 	CHECK((rflags & X86_EFLAGS_FIXED) != 0);
+-	CHECK(!longmode || !vm86_active);
++	CHECK(!long_mode_active || !vm86_active);
+ 	CHECK(((vmentry_intr_info & (INTR_INFO_VALID_MASK |
+ 				     INTR_INFO_INTR_TYPE_MASK)) !=
+ 	       (INTR_INFO_VALID_MASK | INTR_TYPE_EXT_INTR)) ||
+@@ -9754,17 +9731,17 @@ void vmx_check_guest_state(void)
+ 	      activity_state == GUEST_ACTIVITY_ACTIVE);
+ 	if (vmentry_intr_info & INTR_INFO_VALID_MASK) {
+ 		u32 type = vmentry_intr_info & INTR_INFO_INTR_TYPE_MASK;
+-		u32 vector = vmentry_intr_info & INTR_INFO_VECTOR_MASK;
++		u8 vector = vmentry_intr_info & INTR_INFO_VECTOR_MASK;
+ 
+ 		CHECK(activity_state != GUEST_ACTIVITY_HLT ||
+ 		      (type == INTR_TYPE_EXT_INTR ||
+ 		       type == INTR_TYPE_NMI_INTR ||
+ 		       (type == INTR_TYPE_HARD_EXCEPTION &&
+-			(vector == 1 || vector == 18)) ||
+-		       (type == INTR_TYPE_OTHER_EVENT && vector == 0)));
++			(vector == DB_VECTOR || vector == MC_VECTOR)) ||
++		       (type == INTR_TYPE_OTHER_EVENT && vector == DB_VECTOR)));
+ 		CHECK(activity_state != GUEST_ACTIVITY_SHUTDOWN ||
+ 		      (type == INTR_TYPE_NMI_INTR ||
+-		       (type == INTR_TYPE_HARD_EXCEPTION && vector == 18)));
++		       (type == INTR_TYPE_HARD_EXCEPTION && vector == MC_VECTOR)));
+ 		CHECK(activity_state != GUEST_ACTIVITY_WAIT_SIPI);
+ 	}
+ 
+@@ -9798,9 +9775,7 @@ void vmx_check_guest_state(void)
+ 		      !(pending_dbg_exceptions & 0x00004000));
+ 	}
+ 
+-	if (!root_caused) {
+-		pr_err("unexplained VM-entry failure, reason: %#x qualification: %#llx, link ptr: %#llx\n",
+-		       exit_reason, exit_qualification, link_ptr);
+-	}
++	if (!found_issue)
++		pr_info("depriv: validated VMCS guest state\n");
+ }
+ #endif
+-- 
+2.34.1
+

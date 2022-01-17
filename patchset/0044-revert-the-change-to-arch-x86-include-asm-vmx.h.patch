@@ -1,0 +1,23 @@
+From c9ec0c01fd9246d9efc1da42fbd538d4c6682cbb Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 18:10:34 -0700
+Subject: [PATCH 044/140] revert the change to arch/x86/include/asm/vmx.h
+
+---
+ arch/x86/include/asm/vmx.h | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/arch/x86/include/asm/vmx.h b/arch/x86/include/asm/vmx.h
+index 9b1d5bf35d7f..0ffaa3156a4e 100644
+--- a/arch/x86/include/asm/vmx.h
++++ b/arch/x86/include/asm/vmx.h
+@@ -611,6 +611,4 @@ enum vmx_l1d_flush_state {
+ 
+ extern enum vmx_l1d_flush_state l1tf_vmx_mitigation;
+ 
+-extern asmlinkage void depriv_continue_in_root_mode(void);
+-
+ #endif
+-- 
+2.34.1
+

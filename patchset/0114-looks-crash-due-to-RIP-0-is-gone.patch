@@ -1,0 +1,352 @@
+From d8a8a45e2580df3667869b21287f271157fd3509 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Mon, 14 Sep 2020 20:20:07 -0700
+Subject: [PATCH 114/140] looks crash due to RIP == 0 is gone
+
+---
+ arch/x86/depriv/vmx/depriv.c         | 130 +++++++++++++++------------
+ arch/x86/depriv/vmx/depriv_handler.c |   2 +-
+ 2 files changed, 73 insertions(+), 59 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 9953f83d34e3..5257c00f038f 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -91,6 +91,7 @@ static bool volatile depriv_exiting = false;
+  */
+ static struct kmem_cache *loaded_vmcs_cache = NULL;
+ static DEFINE_PER_CPU(struct list_head, loaded_vmcss);
++static DEFINE_PER_CPU(struct vmcs *, current_vmcs);
+ 
+ static inline bool cpu_has_load_perf_global_ctrl(void)
+ {
+@@ -600,26 +601,34 @@ static void vmclear_local_loaded_vmcss(void)
+ 		list_del(&v->loaded_vmcss_on_cpu_link);
+ 		kmem_cache_free(loaded_vmcs_cache, v);
+ 	}
++
++	per_cpu(current_vmcs, cpu) = NULL;
+ }
+ 
+-static void vmx_cpu_vmxoff(void)
++static inline void __cpu_vmxoff(void)
+ {
++	if (!(__read_cr4() & X86_CR4_VMXE)) {
++		pr_err("depriv: CR4.VMXE already cleared on cpu%d\n", raw_smp_processor_id());
++		return;
++	}
++
+ 	asm volatile("vmxoff");
+ 
+ 	intel_pt_handle_vmx(0);
+ 	cr4_clear_bits(X86_CR4_VMXE);
+ }
+ 
+-static void hardware_disable(void)
++static void __hardware_disable(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 
+-	vmclear_local_loaded_vmcss();
++	pr_info("depriv: disabling VMX on cpu%d\n", cpu);
+ 
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+ 		return;
+ 
+-	vmx_cpu_vmxoff();
++	vmclear_local_loaded_vmcss();
++	__cpu_vmxoff();
+ 	cpumask_clear_cpu(cpu, &cpu_vmx_operation_mask);
+ 
+ 	pr_info("depriv: VMX disabled on cpu%d\n", cpu);
+@@ -628,19 +637,20 @@ static void hardware_disable(void)
+ /*
+  * this function must be executed in root mode.
+  */
+-static void vmx_repriv_cpu_release_resources(void)
++static void vmx_repriv_cpu_release_resources(void *unused)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+ 
+-	hardware_disable();
++	__hardware_disable();
+ 
+-	if (host_cpu_state) {
+-		per_cpu(depriv_cpu_state, cpu) = NULL;
+-		memset(host_cpu_state, 0, DEPRIV_CPU_STATE_BUFFER_SIZE);
+-		free_pages((unsigned long)host_cpu_state, DEPRIV_CPU_STATE_PAGE_ORDER);
+-		pr_info("depriv: repriv cpu%d released cpu state buffer\n", cpu);
+-	}
++	if (!host_cpu_state)
++		return;
++
++	per_cpu(depriv_cpu_state, cpu) = NULL;
++	memset(host_cpu_state, 0, DEPRIV_CPU_STATE_BUFFER_SIZE);
++	free_pages((unsigned long)host_cpu_state, DEPRIV_CPU_STATE_PAGE_ORDER);
++	pr_info("depriv: repriv cpu%d released cpu state buffer\n", cpu);
+ }
+ 
+ static inline unsigned long depriv_iret_trampoline_stack(int cpu)
+@@ -659,7 +669,7 @@ void vmx_validate_vmcs(void);
+ static bool __vmx_depriv(bool launch)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	unsigned long rip, rsp, rflags;
++	unsigned long rip, rsp;
+ 	int depriv_result;
+ 
+ 	if (depriv_exiting)
+@@ -673,12 +683,7 @@ static bool __vmx_depriv(bool launch)
+ 	rsp -= 8;
+ 	vmcs_writel(GUEST_RSP, rsp);
+ 
+-	asm volatile("xor %%rax,%%rax\n\t"
+-		     "pushf\n\t"
+-		     "pop %%rax\n\t"
+-		     "mov %%rax,%0"
+-		     : "=m"(rflags) :: "%rax");
+-	vmcs_writel(GUEST_RFLAGS, rflags);
++	vmcs_writel(GUEST_RFLAGS, native_save_fl());
+ 
+ 	if (launch)
+ 		pr_info("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n", cpu, rip, rsp);
+@@ -710,7 +715,7 @@ static bool __vmx_depriv(bool launch)
+ 	return false;
+ }
+ 
+-static int vmx_cpu_vmxon(u64 vmxon_pointer)
++static inline int __cpu_vmxon(u64 vmxon_pointer)
+ {
+ 	u64 msr;
+ 
+@@ -732,33 +737,35 @@ static int vmx_cpu_vmxon(u64 vmxon_pointer)
+ 	return -EFAULT;
+ }
+ 
+-static int hardware_enable(struct vmcs *vmcs)
++static inline int __hardware_enable(struct vmcs *vmcs)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	int r;
+ 
+-	if (cr4_read_shadow() & X86_CR4_VMXE)
++	if (__read_cr4() & X86_CR4_VMXE) {
++		pr_err("depriv: CR4.VMXE already set on cpu%d\n", cpu);
++		return -EBUSY;
++	}
++
++	if (cpumask_test_cpu(cpu, &cpu_vmx_operation_mask)) {
++		pr_err("depriv: VMX operation already enabled on cpu%d\n", cpu);
+ 		return -EBUSY;
++	}
+ 
+ 	memset(vmcs, 0, depriv_vmcs_config.size);
+ 	vmcs->hdr.revision_id = depriv_vmcs_config.revision_id;
+-
+-	r = vmx_cpu_vmxon(__pa(vmcs));
++	r = __cpu_vmxon(__pa(vmcs));
+ 	if (r)
+ 		return r;
+ 
+ 	pr_info("depriv: VMX enabled on cpu%d\n", cpu);
+-
+ 	ept_sync_global();
+-
+-	BUG_ON(cpumask_test_cpu(cpu, &cpu_vmx_operation_mask));
+ 	cpumask_set_cpu(cpu, &cpu_vmx_operation_mask);
+-
+ 	INIT_LIST_HEAD(&per_cpu(loaded_vmcss, cpu));
+ 	return 0;
+ }
+ 
+-static struct vmcs *alloc_vmcs(void)
++static inline struct vmcs *alloc_vmcs(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	struct page *pages;
+@@ -777,13 +784,11 @@ static struct vmcs *alloc_vmcs(void)
+ static void vmx_depriv_cpu(void *info)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	struct depriv_loaded_vmcs *loaded_vmcs = NULL;
++	unsigned long cr3_pa = (unsigned long)info;
+ 	struct page *page = NULL;
+-	void *host_cpu_state = NULL;
+ 	struct vmcs *vmcs = NULL;
+-	void *host_cr3_va = NULL;
+-	unsigned long cr3_pa = (unsigned long)info;
+-	void *msr_bitmap = NULL;
++	void *host_cpu_state, *host_cr3_va, *msr_bitmap;
++	struct depriv_loaded_vmcs *loaded_vmcs = NULL;
+ 	unsigned long host_rsp;
+ 	int r;
+ 
+@@ -799,8 +804,7 @@ static void vmx_depriv_cpu(void *info)
+ 	per_cpu(depriv_cpu_state, cpu) = host_cpu_state;
+ 
+ 	// page 3 of host state
+-	vmcs = (struct vmcs *)(host_cpu_state + DEPRIV_CPU_STATE_VMXON_VMCS);
+-	r = hardware_enable(vmcs);
++	r = __hardware_enable((struct vmcs *)(host_cpu_state + DEPRIV_CPU_STATE_VMXON_VMCS));
+ 	if (r) {
+ 		pr_err("depriv: vmxon error %d, unable to enable VMX on cpu%d\n", r, cpu);
+ 		goto error;
+@@ -836,6 +840,8 @@ static void vmx_depriv_cpu(void *info)
+ 	vmcs_load(vmcs);
+ 	indirect_branch_prediction_barrier();
+ 
++	per_cpu(current_vmcs, cpu) = vmcs;
++
+ 	vmcs_write64(VMCS_LINK_POINTER, ~0ull);
+ 	vmcs_writel(HOST_CR3, __pa(host_cr3_va));
+ 	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+@@ -863,7 +869,8 @@ static void vmx_depriv_cpu(void *info)
+ 		return;
+ 
+ error:
+-	vmx_repriv_cpu_release_resources();
++	pr_info("depriv: got to disable VMX on cpu%d\n", cpu);
++	__hardware_disable();
+ }
+ 
+ static void vmx_repriv_cpu_crs(void)
+@@ -1014,28 +1021,33 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ /*
+  * WARNING: must be called with interrupt disabled!
+  */
+-static void vmx_repriv(void)
++static inline void __vmx_repriv(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+-	unsigned long root_mode_rsp = (unsigned long)host_cpu_state + PAGE_SIZE
+-					- DEPRIV_HOST_STACK_RESERVED_BYTES;
+-	bool *in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH);
+ 
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+ 		return;
+ 
+-	*in_depriv_switch = true;
+ 	asm_volatile_goto("1: vmcall\n\t"
+ 			  _ASM_EXTABLE(1b, %l[fault])
+ 			  : : : : fault);
+-	*in_depriv_switch = false;
+-
++fault:
+ 	return;
++}
+ 
+-fault:
+-	// vmcall faulted, was in root mode already
+-	vmx_repriv_cpu_release_resources();
++static void vmx_repriv(void)
++{
++	int cpu = raw_smp_processor_id();
++	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
++	unsigned long root_mode_rsp = (unsigned long)host_cpu_state + PAGE_SIZE
++					- DEPRIV_HOST_STACK_RESERVED_BYTES;
++	bool *in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH);
++
++	if (test_handle_invalid_host_state || test_handle_invalid_guest_state)
++		return;
++
++	*in_depriv_switch = true;
++	__vmx_repriv();
+ 	*in_depriv_switch = false;
+ }
+ 
+@@ -1045,11 +1057,11 @@ static void vmx_repriv_cpu(void *info)
+ 	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+ 
+ 	if (!host_cpu_state) {
+-		pr_info("depriv: cpu%d alraedy reprivileged\n", cpu);
++		pr_info("depriv: cpu%d already reprivileged\n", cpu);
+ 		return;
+ 	}
+ 
+-	vmx_repriv();
++	__vmx_repriv();
+ 
+ 	// switched to root mode
+ 	pr_info("depriv: cpu%d reprivileged\n", cpu);
+@@ -1129,7 +1141,7 @@ bool vmx_repriv_cpu_state(void)
+ 		trampoline_cr3_pa &= ~PTI_USER_PGTABLE_MASK;
+ #endif
+ 
+-	// make sure we can call vmx_repriv_cpu_release_resources()
++	// make sure we can execute non-root mode code in root mode
+ 	native_write_cr3(trampoline_cr3_pa | (cr3 & 0x7ff));
+ 
+ 	if (vmcs_read32(CR3_TARGET_COUNT) == DEPRIV_INVALID_HOST_CR3_TARGET_COUNT)
+@@ -1171,7 +1183,7 @@ bool vmx_repriv_cpu_state(void)
+ 			"non-root GS base %#lx kernel GS base MSR %#lx (GS base MSR %#lx)\n",
+ 			cpu, vmcs_readl(GUEST_RIP), vmcs_readl(GUEST_RSP),
+ 			vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE), read_msr(MSR_GS_BASE));
+-		vmx_repriv_cpu_release_resources();
++		__hardware_disable();
+ 	}
+ 
+ 	return true;
+@@ -1286,6 +1298,9 @@ static bool vmx_depriv(void)
+ 					- DEPRIV_HOST_STACK_RESERVED_BYTES;
+ 	bool *in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH), r;
+ 
++	if (test_handle_invalid_host_state || test_handle_invalid_guest_state)
++		return false;
++
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+ 		return false;
+ 
+@@ -1314,7 +1329,10 @@ static int __init vmx_depriv_init(void)
+ 	}
+ 
+ 	r = -EIO;
++	pr_info("depriv: CPUs initializing\n");
+ 	on_each_cpu(vmx_depriv_cpu, (void *)read_cr3_pa(), 1);
++	pr_info("depriv: all CPUs successfully initialized\n");
++
+ 	pr_info("depriv: cpu vmx operation mask: %*pb[l]\n", cpumask_pr_args(&cpu_vmx_operation_mask));
+ 	if (cpumask_empty(&cpu_vmx_operation_mask))
+ 		goto out_free_loaded_vmcs_cache;
+@@ -1333,11 +1351,6 @@ static int __init vmx_depriv_init(void)
+ 
+ static void __exit vmx_depriv_exit(void)
+ {
+-	if (cpumask_empty(&cpu_vmx_operation_mask)) {
+-		pr_info("depriv: no cpus deprivileged\n");
+-		goto exit;
+-	}
+-
+ 	depriv_exiting = true;
+ 
+ 	pr_info("depriv: %d cpus deprivileged, reprivileging...\n",
+@@ -1358,10 +1371,11 @@ static void __exit vmx_depriv_exit(void)
+ 	depriv_ops.enter = NULL;
+ 	depriv_ops.exit = NULL;
+ 
++	on_each_cpu(vmx_repriv_cpu_release_resources, NULL, 1);
++
+ 	pr_info("depriv: successfully unloaded, cpu vmx operation mask: %*pb[l]\n",
+ 		cpumask_pr_args(&cpu_vmx_operation_mask));
+ 
+-exit:
+ 	kmem_cache_destroy(loaded_vmcs_cache);
+ }
+ 
+diff --git a/arch/x86/depriv/vmx/depriv_handler.c b/arch/x86/depriv/vmx/depriv_handler.c
+index b380f1a53373..99ab3e07e5a2 100644
+--- a/arch/x86/depriv/vmx/depriv_handler.c
++++ b/arch/x86/depriv/vmx/depriv_handler.c
+@@ -273,7 +273,7 @@ static int handle_cr_access(unsigned long *regs, unsigned long cnt)
+ 		break;
+ 	}
+ 
+-	pr_debug("depriv: cpu%d (%ld) accessed cr%d\n", cpu, cnt, cr);
++	pr_info("depriv: cpu%d (%ld) accessed cr%d\n", cpu, cnt, cr);
+ 	return 0;
+ }
+ 
+-- 
+2.34.1
+

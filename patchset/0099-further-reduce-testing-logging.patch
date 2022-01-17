@@ -1,0 +1,51 @@
+From 2e56562d05a7fce82179d7e846740328ab4308d8 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 25 Jun 2020 11:50:50 -0700
+Subject: [PATCH 099/140] further reduce testing logging
+
+---
+ arch/x86/kvm/vmx/depriv_handler.c | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv_handler.c b/arch/x86/kvm/vmx/depriv_handler.c
+index 6155cb358eeb..49cf34bc7a36 100644
+--- a/arch/x86/kvm/vmx/depriv_handler.c
++++ b/arch/x86/kvm/vmx/depriv_handler.c
+@@ -126,7 +126,7 @@ static void handle_cr3_access(unsigned long *regs, unsigned long cnt)
+ 		cr3 &= ~X86_CR3_PCID_NOFLUSH;
+ 		vmcs_writel(GUEST_CR3, cr3);
+ 
+-		if (cnt % 100)
++		if (cnt % 300)
+ 			break;
+ 
+ 		pr_info("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx)\n",
+@@ -140,7 +140,7 @@ static void handle_cr3_access(unsigned long *regs, unsigned long cnt)
+ 		if (reg == VCPU_REGS_RSP)
+ 			vmcs_writel(GUEST_RSP, regs[reg]);
+ 
+-		if (cnt % 100)
++		if (cnt % 300)
+ 			break;
+ 
+ 		pr_info("depriv: cpu%d (%ld) read cr3 to reg%d: %#lx\n",
+@@ -243,10 +243,12 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr);
+ 	vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, insn_len);
+ 	vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
+-	pr_info("depriv: cpu%d (%ld) injecting exception %d\n", cpu, cnt, vector);
+-#if 0
+-	DEPRIV_DUMP_GPRS;
+-#endif
++
++	if (!(cnt % 100) && vector == PF_VECTOR) {
++		pr_info("depriv: cpu%d (%ld) injecting exception %d\n", cpu, cnt, vector);
++		DEPRIV_DUMP_GPRS;
++	}
++
+ 	return 0;
+ }
+ 
+-- 
+2.34.1
+

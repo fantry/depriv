@@ -1,0 +1,48 @@
+From ee9061e2e26b34bfa7851229377829424cdd859d Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 21:17:31 -0700
+Subject: [PATCH 047/140] don't use VM-exit MSR load area
+
+---
+ arch/x86/kvm/vmx/depriv.c | 18 ------------------
+ 1 file changed, 18 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 14919c366a8e..8adde2f03874 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1001,22 +1001,6 @@ static void vmx_depriv_cpu_intercept_msr(u32 msr, bool enable)
+ 		       cpu, orig_msr);
+ }
+ 
+-static void vmx_depriv_cpu_autosave_msrs(struct vmx_msrs *msrs)
+-{
+-	if (!msrs)
+-		return;
+-
+-	msrs->nr = 0;
+-
+-	if (msrs->nr > 0)
+-		msrs->val[0].index = MSR_FS_BASE;
+-	if (msrs->nr > 1)
+-		msrs->val[1].index = MSR_GS_BASE;
+-
+-	vmcs_write32(VM_EXIT_MSR_STORE_COUNT, msrs->nr);
+-	vmcs_write64(VM_EXIT_MSR_STORE_ADDR, __pa(msrs->val));
+-}
+-
+ #define	DEPRIV_IRET_STACK_RIP							\
+ 	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_RIP_OFFSET))
+ #define	DEPRIV_IRET_STACK_CS							\
+@@ -1098,8 +1082,6 @@ static void __init vmx_depriv_cpu(void *info)
+ 	//vmx_depriv_cpu_intercept_msr(MSR_KERNEL_GS_BASE, true);
+ 	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+ 
+-	vmx_depriv_cpu_autosave_msrs(host_cpu_state);
+-
+ 	vmx_depriv_cpu_state();
+ 
+ 	vmcs_writel(HOST_RIP, (unsigned long)vmx_depriv_vmexit);
+-- 
+2.34.1
+

@@ -1,0 +1,39 @@
+From 93dea7fe1564867155eed7c42f71a2f7297ec68f Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 18 Jun 2020 22:04:48 -0700
+Subject: [PATCH 062/140] don't write to vmexit instruction len
+
+---
+ arch/x86/kvm/vmx/depriv.c         | 3 ++-
+ arch/x86/kvm/vmx/depriv_handler.c | 1 -
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 29e52a548367..5f2ff363cb28 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -909,7 +909,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ 	default:
+ 		if (call_extra_exit_handlers && !vmx_depriv_handle(reason, regs, *cnt)) {
+-			insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
++			if (reason != EXIT_REASON_EXCEPTION_NMI)
++				insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+ 
+diff --git a/arch/x86/kvm/vmx/depriv_handler.c b/arch/x86/kvm/vmx/depriv_handler.c
+index 001d181e74cc..b3c16c0b8d46 100644
+--- a/arch/x86/kvm/vmx/depriv_handler.c
++++ b/arch/x86/kvm/vmx/depriv_handler.c
+@@ -180,7 +180,6 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 
+ 		DEPRIV_DUMP_GPRS;
+ 
+-		vmcs_write32(VM_EXIT_INSTRUCTION_LEN, 0);
+ 		return 0;
+ 	}
+ }
+-- 
+2.34.1
+

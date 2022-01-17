@@ -1,0 +1,97 @@
+From 088bc9849c722414a3009ff64fa62d0c22b727dd Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Thu, 18 Jun 2020 20:22:12 -0700
+Subject: [PATCH 060/140] fix reboot repriv
+
+---
+ arch/x86/kvm/vmx/depriv.c | 27 ++++++++++-----------------
+ arch/x86/kvm/vmx/depriv.h |  1 +
+ arch/x86/kvm/vmx/vmx.c    |  3 +++
+ 3 files changed, 14 insertions(+), 17 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 1d34a1088baf..46bd14b1371c 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -65,7 +65,6 @@ static struct vmcs_config depriv_vmcs_conf;
+ static unsigned long depriv_task_cr3_pa;
+ static struct semaphore depriv_cpu_count_sema;
+ static atomic_t depriv_cpu_count;
+-static struct semaphore depriv_repriv_sema;
+ 
+ static DEFINE_PER_CPU(struct vmcs *, depriv_vmcs);
+ static DEFINE_PER_CPU(void *, depriv_cpu_state);
+@@ -792,7 +791,7 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ 	vmx_repriv_cpu_tr();
+ }
+ 
+-static void vmx_repriv_cpu(void *info)
++void vmx_repriv_cpu(void *info)
+ {
+ 	int cpu = smp_processor_id();
+ 	int *to_root_mode = (int *)(per_cpu(depriv_cpu_state, cpu) +
+@@ -921,20 +920,6 @@ static int depriv_task(void *unused)
+ 
+ 	sema_init(&depriv_cpu_count_sema, 0);
+ 	on_each_cpu(vmx_depriv_cpu, NULL, 0);
+-
+-	sema_init(&depriv_repriv_sema, 0);
+-	if (down_interruptible(&depriv_repriv_sema))
+-		pr_err("depriv: repriv semaphore interrupted\n");
+-
+-	pr_info("depriv: %d cpus deprivileged, reprivileging...\n",
+-		atomic_read(&depriv_cpu_count));
+-	on_each_cpu(vmx_repriv_cpu, NULL, 0);
+-
+-	if (down_interruptible(&depriv_cpu_count_sema))
+-		pr_err("depriv: cpu count semaphore interrupted\n");
+-
+-	pr_info("depriv: %d cpus still in non-root mode\n",
+-		atomic_read(&depriv_cpu_count));
+ 	return 0;
+ }
+ 
+@@ -950,5 +935,13 @@ void __init vmx_depriv_host(void)
+ 
+ void vmx_repriv_host(void)
+ {
+-	up(&depriv_repriv_sema);
++	pr_info("depriv: %d cpus deprivileged, reprivileging...\n",
++		atomic_read(&depriv_cpu_count));
++	on_each_cpu(vmx_repriv_cpu, NULL, 0);
++
++	if (down_interruptible(&depriv_cpu_count_sema))
++		pr_err("depriv: cpu count semaphore interrupted\n");
++
++	pr_info("depriv: %d cpus still in non-root mode\n",
++		atomic_read(&depriv_cpu_count));
+ }
+diff --git a/arch/x86/kvm/vmx/depriv.h b/arch/x86/kvm/vmx/depriv.h
+index 9fb2120e7217..955de37954bd 100644
+--- a/arch/x86/kvm/vmx/depriv.h
++++ b/arch/x86/kvm/vmx/depriv.h
+@@ -3,6 +3,7 @@
+ #define _X86_VMX_DEPRIV_H
+ 
+ void __init vmx_depriv_host(void);
++void vmx_repriv_cpu(void *info);
+ void vmx_repriv_host(void);
+ 
+ #endif /* _X86_VMX_DEPRIV_H */
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 22e92d6da219..a7bb0aba4880 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -2389,6 +2389,9 @@ static void vmclear_local_loaded_vmcss(void)
+ 
+ static void hardware_disable(void)
+ {
++#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV)
++	vmx_repriv_cpu(NULL);
++#endif
+ 	vmclear_local_loaded_vmcss();
+ 
+ 	if (cpu_vmxoff())
+-- 
+2.34.1
+

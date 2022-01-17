@@ -1,0 +1,78 @@
+From 934edb9d00510ab837d9eb95baa66120f8558ad5 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 21 Jan 2021 17:24:54 -0800
+Subject: [PATCH 133/140] move DEPRIV_DUMP_GPRS to asm header file
+
+---
+ arch/x86/depriv/vmx/depriv.c  |  2 ++
+ arch/x86/depriv/vmx/handler.c | 12 +-----------
+ arch/x86/include/asm/depriv.h | 10 ++++++++++
+ 3 files changed, 13 insertions(+), 11 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index db235442cc24..a467b22028c6 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -435,6 +435,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		pr_debug("depriv: cpu%d (%ld) exit reason: %d cpu depriv mode mask: %*pb[l]\n",
+ 			 cpu, counter, reason, cpumask_pr_args(&cpu_depriv_mode_mask));
+ 
++		DEPRIV_DUMP_GPRS(regs);
++
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
+ 		switch (call_no) {
+diff --git a/arch/x86/depriv/vmx/handler.c b/arch/x86/depriv/vmx/handler.c
+index 95a861ab09c9..f5da083d7fa7 100644
+--- a/arch/x86/depriv/vmx/handler.c
++++ b/arch/x86/depriv/vmx/handler.c
+@@ -15,16 +15,6 @@
+ 
+ #include "vmx.h"
+ 
+-#define DEPRIV_DUMP_GPRS do {							\
+-	int i;									\
+-	pr_info("depriv: cpu%d non-root mode GPRs:\n", cpu);			\
+-	for (i = __VCPU_REGS_RAX; i <= __VCPU_REGS_R15; i += 4) {		\
+-		unsigned long *r = &regs[i];					\
+-		pr_info("\tcpu%d\t%016lx %016lx %016lx %016lx\n",		\
+-			cpu, *r, *(r + 1), *(r + 2), *(r + 3));			\
+-	}									\
+-} while (0)
+-
+ /*
+  * if non-root mode rip is a user level virtual address then it's mostly not
+  * valid in root mode, because it is mapped using non-root mode cr3 and page
+@@ -262,7 +252,7 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 
+ 	if (!(cnt % 100) && vector == PF_VECTOR) {
+ 		pr_info("depriv: cpu%d (%ld) injecting exception %d\n", cpu, cnt, vector);
+-		DEPRIV_DUMP_GPRS;
++		DEPRIV_DUMP_GPRS(regs);
+ 	}
+ 
+ 	return 0;
+diff --git a/arch/x86/include/asm/depriv.h b/arch/x86/include/asm/depriv.h
+index 7042b03fa4e6..8b81951c9ab2 100644
+--- a/arch/x86/include/asm/depriv.h
++++ b/arch/x86/include/asm/depriv.h
+@@ -7,6 +7,16 @@
+ #include <asm/percpu.h>
+ #include <asm/cpu_entry_area.h>
+ 
++#define DEPRIV_DUMP_GPRS(regs) do {					\
++	int i, cpu = raw_smp_processor_id();				\
++	unsigned long *r = &regs[0];					\
++	pr_info("depriv: cpu%d non-root mode GPRs:\n", cpu);		\
++	for (i = __VCPU_REGS_RAX; i <= __VCPU_REGS_R15; i += 4) {	\
++		pr_info("\tcpu%d\t%016lx %016lx %016lx %016lx\n",	\
++			cpu, r[i], r[i + 1], r[i + 2], r[i + 3]);	\
++	}								\
++} while (0)
++
+ struct depriv_ops {
+ 	bool (*enter)(struct task_struct *);
+ 	void (*exit)(void);
+-- 
+2.34.1
+

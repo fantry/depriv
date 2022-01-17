@@ -1,0 +1,126 @@
+From e94997e592babf399dfdaccec8c7075005dee094 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 9 Jun 2020 18:25:28 -0700
+Subject: [PATCH 003/140] enable logging for GS base MSR
+
+---
+ arch/x86/kvm/vmx/vmx.c | 40 ++++++++++++++++++++++++----------------
+ 1 file changed, 24 insertions(+), 16 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 36211e7db022..d06a40a3de46 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8247,12 +8247,12 @@ static void __init vmx_depriv_cpu_segments(unsigned long gdt_base)
+ 	DEPRIV_SEGMENT(GS, false);
+ 
+ 	base = read_msr(MSR_FS_BASE);
+-	pr_debug("depriv: cpu %d FS base MSR %#lx\n", cpu, base);
++	pr_info("depriv: cpu %d FS base MSR %#lx\n", cpu, base);
+ 	vmcs_writel(HOST_FS_BASE, base);
+ 	vmcs_writel(GUEST_FS_BASE, base);
+ 
+ 	base = read_msr(MSR_GS_BASE);
+-	pr_debug("depriv: cpu %d GS base MSR %#lx\n", cpu, base);
++	pr_info("depriv: cpu %d GS base MSR %#lx\n", cpu, base);
+ 	vmcs_writel(HOST_GS_BASE, base);
+ 	vmcs_writel(GUEST_GS_BASE, base);
+ }
+@@ -8585,7 +8585,7 @@ static void dump_fs(void)
+ 	pr_debug("depriv: cpu %d " #TAG "S %#x\n", cpu, sel);			\
+ } while (0)
+ 
+-#define DEPRIV_FSGS_BASE(TAG) do {						\
++#define REPRIV_FSGS_BASE(TAG) do {						\
+ 	host_base = read_msr(MSR_##TAG##S_BASE);				\
+ 	guest_base = vmcs_readl(GUEST_##TAG##S_BASE);				\
+ 	pr_debug("depriv: cpu %d " #TAG "S base %#lx : %#lx\n",			\
+@@ -8593,6 +8593,7 @@ static void dump_fs(void)
+ 	if (host_base != guest_base) {						\
+ 		pr_info("depriv: cpu %d " #TAG "S base mismatch %#lx : %#lx\n",	\
+ 			cpu, host_base, guest_base);				\
++		vmcs_writel(HOST_##TAG##S_BASE, guest_base);			\
+ 		wrmsrl(MSR_##TAG##S_BASE, guest_base);				\
+ 	}									\
+ } while (0)
+@@ -8614,8 +8615,8 @@ static inline void vmx_repriv_cpu_segments(void)
+ 	REPRIV_SEGMENT(g, G);
+ #undef depriv_loadsegment
+ 
+-	DEPRIV_FSGS_BASE(F);
+-	DEPRIV_FSGS_BASE(G);
++	REPRIV_FSGS_BASE(F);
++	REPRIV_FSGS_BASE(G);
+ 
+ 	/*
+ 	 * XXX: FS handling is complicated
+@@ -8661,7 +8662,7 @@ static inline void vmx_repriv_cpu_tr(void)
+ 	if (host_dt.address != guest_dt_base)					\
+ 		pr_err("depriv: cpu %d " #tag "dt base mismatch %#lx : %#lx\n",	\
+ 		       cpu, host_dt.address, guest_dt_base);			\
+-	/*vmcs_writel(HOST_##TAG##DTR_BASE, guest_dt_base);*/			\
++	vmcs_writel(HOST_##TAG##DTR_BASE, guest_dt_base);			\
+ 	guest_dt_limit = vmcs_read32(GUEST_##TAG##DTR_LIMIT);			\
+ 	if (host_dt.size != guest_dt_limit) {					\
+ 		pr_debug("depriv: cpu %d " #tag "dt limit mismatch %#x : %#x\n",\
+@@ -8920,31 +8921,30 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 	}
+ 
+ 	case EXIT_REASON_MSR_WRITE: {
++		bool continue_in_root_mode = false;
+ 		u32 ecx = (u32)guest_regs[__VCPU_REGS_RCX];
+ 		unsigned long val = (unsigned long)(u32)guest_regs[__VCPU_REGS_RAX] |
+ 				    ((unsigned long)(u32)guest_regs[__VCPU_REGS_RDX] << 32);
+ 
+-		if (wrmsrl_safe(ecx, val)) {
+-			pr_info("depriv: cpu %d msr[%#x] = %#lx failed\n", cpu, ecx, val);
+-			CONTINUE_IN_ROOT_MODE(0);
+-		}
++		if (wrmsrl_safe(ecx, val))
++			continue_in_root_mode = true;
+ 
+ 		switch (ecx) {
+ 		case MSR_IA32_SPEC_CTRL:
+ 			pr_debug("depriv: cpu %d speculation control msr = %#lx\n", cpu, val);
+ 			break;
+ 		case MSR_FS_BASE:
+-			pr_debug("depriv: cpu %d FS base = %#lx\n", cpu, val);
++			pr_info("depriv: cpu %d FS base MSR = %#lx\n", cpu, val);
+ 			vmcs_writel(GUEST_FS_BASE, val);
+ 			vmcs_writel(HOST_FS_BASE, val);
+ 			break;
+ 		case MSR_GS_BASE:
+-			pr_info("depriv: cpu %d GS base = %#lx\n", cpu, val);
++			pr_info("depriv: cpu %d GS base MSR = %#lx\n", cpu, val);
+ 			vmcs_writel(GUEST_GS_BASE, val);
+-			vmcs_writel(HOST_GS_BASE, val);
++			//vmcs_writel(HOST_GS_BASE, val);
+ 			break;
+ 		case MSR_KERNEL_GS_BASE:
+-			pr_info("depriv: cpu %d kernel GS base = %#lx\n", cpu, val);
++			pr_info("depriv: cpu %d kernel GS base MSR = %#lx\n", cpu, val);
+ 			break;
+ 		case MSR_IA32_TSCDEADLINE:
+ 			pr_debug("depriv: cpu %d TSC deadline = %#lx\n", cpu, val);
+@@ -8957,8 +8957,16 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			break;
+ 		}
+ 
+-		pr_debug("depriv: cpu %d executed wrmsr and continue in non-root mode\n", cpu);
+-		CONTINUE_IN_NON_ROOT_MODE;
++		if (unlikely(continue_in_root_mode)) {
++			pr_info("depriv: cpu %d msr[%#x] = %#lx failed, continue in root mode\n",
++				cpu, ecx, val);
++			CONTINUE_IN_ROOT_MODE(0);
++		} else {
++			pr_debug("depriv: cpu %d executed wrmsr and continue in non-root mode\n", cpu);
++			CONTINUE_IN_NON_ROOT_MODE;
++		}
++
++		break;
+ 	}
+ 
+ 	default: /* continue in root mode */
+-- 
+2.34.1
+

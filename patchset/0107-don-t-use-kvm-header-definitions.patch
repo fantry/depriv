@@ -1,0 +1,397 @@
+From c28402a56d98b89ea7f1225053733fafdd9fce19 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 6 Sep 2020 23:00:11 -0700
+Subject: [PATCH 107/140] don't use kvm header definitions
+
+---
+ arch/x86/depriv/vmx/depriv.c           | 22 +++++++++++--------
+ arch/x86/depriv/vmx/depriv_handler.c   | 23 +++++++++++---------
+ arch/x86/depriv/vmx/depriv_validator.c | 17 ++++++++++++---
+ arch/x86/depriv/vmx/vmx.h              |  4 ++++
+ arch/x86/include/asm/kvm_host.h        |  5 +++++
+ arch/x86/include/asm/kvm_vcpu_regs.h   | 20 +-----------------
+ arch/x86/include/asm/msr.h             | 10 +++++++++
+ arch/x86/include/asm/x86_vcpu_regs.h   | 25 ++++++++++++++++++++++
+ include/linux/depriv_types.h           |  8 +++++++
+ include/linux/kvm_types.h              | 22 +------------------
+ include/linux/virt_types.h             | 29 ++++++++++++++++++++++++++
+ 11 files changed, 123 insertions(+), 62 deletions(-)
+ create mode 100644 arch/x86/include/asm/x86_vcpu_regs.h
+ create mode 100644 include/linux/depriv_types.h
+ create mode 100644 include/linux/virt_types.h
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 39b15b7ae309..9c09827faef3 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -7,13 +7,17 @@
+  */
+ 
+ #include <linux/delay.h>
++#include <linux/depriv_types.h>
++#include <linux/module.h>
+ #include <linux/semaphore.h>
+-#include <linux/kvm_host.h>
+ 
+ #include <asm/atomic.h>
+ #include <asm/debugreg.h>
+-#include <asm/insn.h>
++#include <asm/desc.h>
++#include <asm/msr.h>
++#include <asm/perf_event.h>
+ #include <asm/tlbflush.h>
++#include <asm/x86_vcpu_regs.h>
+ 
+ #include "vmx.h"
+ 
+@@ -1158,7 +1162,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ 	cpumask_clear_cpu(cpu, &cpu_depriv_mode_mask);
+ 
+-	regs[VCPU_REGS_RSP] = rsp;
++	regs[__VCPU_REGS_RSP] = rsp;
+ 
+ 	(*cnt)++;
+ 	counter = *cnt;
+@@ -1169,7 +1173,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		reason &= ~VMX_EXIT_REASONS_FAILED_VMENTRY;
+ 
+ 		if (rip == (unsigned long)vmx_depriv_rip)
+-			regs[VCPU_REGS_RAX] = 2;
++			regs[__VCPU_REGS_RAX] = 2;
+ 
+ 		vmx_validate_guest_state();
+ 		DEPRIV_SWITCH_TO_ROOT_MODE;
+@@ -1183,12 +1187,12 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	case EXIT_REASON_CPUID:
+ 		if (!(counter % log_mod))
+ 			pr_info("depriv: cpu%d (%ld) cpuid[%#x]\n",
+-				cpu, counter, (u32)regs[VCPU_REGS_RAX]);
++				cpu, counter, (u32)regs[__VCPU_REGS_RAX]);
+ 
+-		native_cpuid((unsigned int *)&regs[VCPU_REGS_RAX],
+-			     (unsigned int *)&regs[VCPU_REGS_RBX],
+-			     (unsigned int *)&regs[VCPU_REGS_RCX],
+-			     (unsigned int *)&regs[VCPU_REGS_RDX]);
++		native_cpuid((unsigned int *)&regs[__VCPU_REGS_RAX],
++			     (unsigned int *)&regs[__VCPU_REGS_RBX],
++			     (unsigned int *)&regs[__VCPU_REGS_RCX],
++			     (unsigned int *)&regs[__VCPU_REGS_RDX]);
+ 
+ 		if (!test_early_invalid_state && counter > 50) {
+ 			if (test_handle_invalid_host_state)
+diff --git a/arch/x86/depriv/vmx/depriv_handler.c b/arch/x86/depriv/vmx/depriv_handler.c
+index 49cf34bc7a36..b380f1a53373 100644
+--- a/arch/x86/depriv/vmx/depriv_handler.c
++++ b/arch/x86/depriv/vmx/depriv_handler.c
+@@ -6,16 +6,19 @@
+  * 	Xin Li <fantry@gmail.com>
+  */
+ 
+-#include <linux/kvm_host.h>
++#include <linux/thread_info.h>
+ 
+ #include <asm/insn.h>
++#include <asm/smp.h>
++#include <asm/string.h>
++#include <asm/x86_vcpu_regs.h>
+ 
+ #include "vmx.h"
+ 
+ #define DEPRIV_DUMP_GPRS do {							\
+ 	int i;									\
+ 	pr_info("depriv: cpu%d non-root mode GPRs:\n", cpu);			\
+-	for (i = VCPU_REGS_RAX; i <= VCPU_REGS_R15; i += 4) {			\
++	for (i = __VCPU_REGS_RAX; i <= __VCPU_REGS_R15; i += 4) {		\
+ 		unsigned long *r = &regs[i];					\
+ 		pr_info("\tcpu%d\t%016lx %016lx %016lx %016lx\n",		\
+ 			cpu, *r, *(r + 1), *(r + 2), *(r + 3));			\
+@@ -137,7 +140,7 @@ static void handle_cr3_access(unsigned long *regs, unsigned long cnt)
+ 		regs[reg] = vmcs_readl(GUEST_CR3);
+ 
+ 		/* XXX RSP in regs won't be loaded into non-root mode */
+-		if (reg == VCPU_REGS_RSP)
++		if (reg == __VCPU_REGS_RSP)
+ 			vmcs_writel(GUEST_RSP, regs[reg]);
+ 
+ 		if (cnt % 300)
+@@ -181,7 +184,7 @@ static void handle_cr4_access(unsigned long *regs, unsigned long cnt)
+ 		regs[reg] = vmcs_readl(CR4_READ_SHADOW);
+ 
+ 		/* XXX RSP in regs won't be loaded into non-root mode */
+-		if (reg == VCPU_REGS_RSP)
++		if (reg == __VCPU_REGS_RSP)
+ 			vmcs_writel(GUEST_RSP, regs[reg]);
+ 
+ 		pr_info("depriv: cpu%d (%ld) read cr4 to reg%d: %#lx\n",
+@@ -277,7 +280,7 @@ static int handle_cr_access(unsigned long *regs, unsigned long cnt)
+ static int handle_msr_read(unsigned long *regs, unsigned long cnt)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	u32 ecx = (u32)regs[VCPU_REGS_RCX];
++	u32 ecx = (u32)regs[__VCPU_REGS_RCX];
+ 	unsigned long val;
+ 
+ 	if (ecx == MSR_FS_BASE) {
+@@ -295,8 +298,8 @@ static int handle_msr_read(unsigned long *regs, unsigned long cnt)
+ 	else
+ 		pr_info("depriv: cpu%d (%ld) MSR[%#x]: %#lx\n", cpu, cnt, ecx, val);
+ 
+-	*((u32 *)&regs[VCPU_REGS_RAX]) = (u32)val;
+-	*((u32 *)&regs[VCPU_REGS_RDX]) = (u32)(val >> 32);
++	*((u32 *)&regs[__VCPU_REGS_RAX]) = (u32)val;
++	*((u32 *)&regs[__VCPU_REGS_RDX]) = (u32)(val >> 32);
+ 
+ 	pr_info("depriv: cpu%d (%ld) executed rdmsr\n", cpu, cnt);
+ 	return 0;
+@@ -306,9 +309,9 @@ static int handle_msr_write(unsigned long *regs, unsigned long cnt)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	bool continue_in_root_mode = false;
+-	u32 ecx = (u32)regs[VCPU_REGS_RCX];
+-	unsigned long val = (unsigned long)(u32)regs[VCPU_REGS_RAX] |
+-			    ((unsigned long)(u32)regs[VCPU_REGS_RDX] << 32);
++	u32 ecx = (u32)regs[__VCPU_REGS_RCX];
++	unsigned long val = (unsigned long)(u32)regs[__VCPU_REGS_RAX] |
++			    ((unsigned long)(u32)regs[__VCPU_REGS_RDX] << 32);
+ 
+ 	if (ecx == MSR_GS_BASE) {
+ 		/*
+diff --git a/arch/x86/depriv/vmx/depriv_validator.c b/arch/x86/depriv/vmx/depriv_validator.c
+index 6b6d787f8ed5..0d6b2d23feb5 100644
+--- a/arch/x86/depriv/vmx/depriv_validator.c
++++ b/arch/x86/depriv/vmx/depriv_validator.c
+@@ -6,11 +6,11 @@
+  * 	Xin Li <fantry@gmail.com>
+  */
+ 
+-#include <linux/kvm_host.h>
+-
+ #include <asm/insn.h>
++#include <asm/msr.h>
++#include <asm/processor-flags.h>
++#include <asm/segment.h>
+ 
+-#include "cpuid.h"
+ #include "vmx.h"
+ 
+ #define check(_c) do {							\
+@@ -62,6 +62,17 @@ static inline bool is_canonical_address(u64 la, u64 cr4)
+ 
+ #define PAGE_M (PAGE_SIZE - 1)
+ 
++enum {
++	VCPU_SREG_ES,
++	VCPU_SREG_CS,
++	VCPU_SREG_SS,
++	VCPU_SREG_DS,
++	VCPU_SREG_FS,
++	VCPU_SREG_GS,
++	VCPU_SREG_TR,
++	VCPU_SREG_LDTR,
++};
++
+ static u32 vmx_segment_sel(u8 seg)
+ {
+ 	switch (seg) {
+diff --git a/arch/x86/depriv/vmx/vmx.h b/arch/x86/depriv/vmx/vmx.h
+index 68d9654ce84e..389713e7c0b4 100644
+--- a/arch/x86/depriv/vmx/vmx.h
++++ b/arch/x86/depriv/vmx/vmx.h
+@@ -2,6 +2,10 @@
+ #ifndef __DEPRIV_X86_VMX_H
+ #define __DEPRIV_X86_VMX_H
+ 
++#include <linux/depriv_types.h>
++
++#include <asm/bug.h>
++#include <asm/page.h>
+ #include <asm/vmx.h>
+ 
+ #define DE_VECTOR 0
+diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
+index 0677b9ea01c9..f3d2f175d4b0 100644
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -1832,6 +1832,11 @@ static inline unsigned long read_msr(unsigned long msr)
+ }
+ #endif
+ 
++static inline u32 get_rdx_init_val(void)
++{
++	return 0x600; /* P6 family */
++}
++
+ static inline void kvm_inject_gp(struct kvm_vcpu *vcpu, u32 error_code)
+ {
+ 	kvm_queue_exception_e(vcpu, GP_VECTOR, error_code);
+diff --git a/arch/x86/include/asm/kvm_vcpu_regs.h b/arch/x86/include/asm/kvm_vcpu_regs.h
+index 1af2cb59233b..3bfb862af3f9 100644
+--- a/arch/x86/include/asm/kvm_vcpu_regs.h
++++ b/arch/x86/include/asm/kvm_vcpu_regs.h
+@@ -2,24 +2,6 @@
+ #ifndef _ASM_X86_KVM_VCPU_REGS_H
+ #define _ASM_X86_KVM_VCPU_REGS_H
+ 
+-#define __VCPU_REGS_RAX  0
+-#define __VCPU_REGS_RCX  1
+-#define __VCPU_REGS_RDX  2
+-#define __VCPU_REGS_RBX  3
+-#define __VCPU_REGS_RSP  4
+-#define __VCPU_REGS_RBP  5
+-#define __VCPU_REGS_RSI  6
+-#define __VCPU_REGS_RDI  7
+-
+-#ifdef CONFIG_X86_64
+-#define __VCPU_REGS_R8   8
+-#define __VCPU_REGS_R9   9
+-#define __VCPU_REGS_R10 10
+-#define __VCPU_REGS_R11 11
+-#define __VCPU_REGS_R12 12
+-#define __VCPU_REGS_R13 13
+-#define __VCPU_REGS_R14 14
+-#define __VCPU_REGS_R15 15
+-#endif
++#include <asm/x86_vcpu_regs.h>
+ 
+ #endif /* _ASM_X86_KVM_VCPU_REGS_H */
+diff --git a/arch/x86/include/asm/msr.h b/arch/x86/include/asm/msr.h
+index d42e6c6b47b1..bd3eb52525aa 100644
+--- a/arch/x86/include/asm/msr.h
++++ b/arch/x86/include/asm/msr.h
+@@ -266,6 +266,16 @@ static inline void wrmsr(unsigned int msr, u32 low, u32 high)
+ #define rdmsrl(msr, val)			\
+ 	((val) = native_read_msr((msr)))
+ 
++#ifdef CONFIG_X86_64
++static inline unsigned long read_msr(unsigned long msr)
++{
++	u64 value;
++
++	rdmsrl(msr, value);
++	return value;
++}
++#endif
++
+ static inline void wrmsrl(unsigned int msr, u64 val)
+ {
+ 	native_write_msr(msr, (u32)(val & 0xffffffffULL), (u32)(val >> 32));
+diff --git a/arch/x86/include/asm/x86_vcpu_regs.h b/arch/x86/include/asm/x86_vcpu_regs.h
+new file mode 100644
+index 000000000000..cb56520bd49b
+--- /dev/null
++++ b/arch/x86/include/asm/x86_vcpu_regs.h
+@@ -0,0 +1,25 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_X86_VCPU_REGS_H
++#define _ASM_X86_VCPU_REGS_H
++
++#define __VCPU_REGS_RAX  0
++#define __VCPU_REGS_RCX  1
++#define __VCPU_REGS_RDX  2
++#define __VCPU_REGS_RBX  3
++#define __VCPU_REGS_RSP  4
++#define __VCPU_REGS_RBP  5
++#define __VCPU_REGS_RSI  6
++#define __VCPU_REGS_RDI  7
++
++#ifdef CONFIG_X86_64
++#define __VCPU_REGS_R8   8
++#define __VCPU_REGS_R9   9
++#define __VCPU_REGS_R10 10
++#define __VCPU_REGS_R11 11
++#define __VCPU_REGS_R12 12
++#define __VCPU_REGS_R13 13
++#define __VCPU_REGS_R14 14
++#define __VCPU_REGS_R15 15
++#endif
++
++#endif /* _ASM_X86_VCPU_REGS_H */
+diff --git a/include/linux/depriv_types.h b/include/linux/depriv_types.h
+new file mode 100644
+index 000000000000..d5db8271a712
+--- /dev/null
++++ b/include/linux/depriv_types.h
+@@ -0,0 +1,8 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef __DEPRIV_TYPES_H__
++#define __DEPRIV_TYPES_H__
++
++#include <linux/virt_types.h>
++
++#endif /* __DEPRIV_TYPES_H__ */
+diff --git a/include/linux/kvm_types.h b/include/linux/kvm_types.h
+index dceac12c1ce5..63c065b7edc5 100644
+--- a/include/linux/kvm_types.h
++++ b/include/linux/kvm_types.h
+@@ -20,30 +20,10 @@ enum kvm_mr_change;
+ 
+ #include <linux/types.h>
+ #include <linux/spinlock_types.h>
++#include <linux/virt_types.h>
+ 
+ #include <asm/kvm_types.h>
+ 
+-/*
+- * Address types:
+- *
+- *  gva - guest virtual address
+- *  gpa - guest physical address
+- *  gfn - guest frame number
+- *  hva - host virtual address
+- *  hpa - host physical address
+- *  hfn - host frame number
+- */
+-
+-typedef unsigned long  gva_t;
+-typedef u64            gpa_t;
+-typedef u64            gfn_t;
+-
+-#define GPA_INVALID	(~(gpa_t)0)
+-
+-typedef unsigned long  hva_t;
+-typedef u64            hpa_t;
+-typedef u64            hfn_t;
+-
+ typedef hfn_t kvm_pfn_t;
+ 
+ struct gfn_to_hva_cache {
+diff --git a/include/linux/virt_types.h b/include/linux/virt_types.h
+new file mode 100644
+index 000000000000..d78e2c71ddbb
+--- /dev/null
++++ b/include/linux/virt_types.h
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++
++#ifndef __VIRT_TYPES_H__
++#define __VIRT_TYPES_H__
++
++#include <linux/types.h>
++
++/*
++ * Address types:
++ *
++ *  gva - guest virtual address
++ *  gpa - guest physical address
++ *  gfn - guest frame number
++ *  hva - host virtual address
++ *  hpa - host physical address
++ *  hfn - host frame number
++ */
++
++typedef unsigned long  gva_t;
++typedef u64            gpa_t;
++typedef u64            gfn_t;
++
++#define GPA_INVALID	(~(gpa_t)0)
++
++typedef unsigned long  hva_t;
++typedef u64            hpa_t;
++typedef u64            hfn_t;
++
++#endif /* __VIRT_TYPES_H__ */
+-- 
+2.34.1
+

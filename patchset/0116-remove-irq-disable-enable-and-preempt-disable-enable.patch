@@ -1,0 +1,114 @@
+From 2f21bd1c215f2ff71a96255ff4c842459b3c2031 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 15 Sep 2020 17:25:15 -0700
+Subject: [PATCH 116/140] remove irq disable/enable and preempt disable/enable
+
+---
+ arch/x86/depriv/vmx/depriv.c | 35 +++++++++--------------------------
+ 1 file changed, 9 insertions(+), 26 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index a746924f9005..937d0f12a2bd 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -785,15 +785,12 @@ static inline struct vmcs *alloc_vmcs(void)
+ static void vmx_depriv_cpu(void *info)
+ {
+ 	int cpu = raw_smp_processor_id(), r;
+-	unsigned long cr3_pa = (unsigned long)info, host_rsp, flags;
++	unsigned long cr3_pa = (unsigned long)info, host_rsp;
+ 	struct page *page = NULL;
+ 	struct vmcs *vmcs = NULL;
+ 	void *host_cpu_state, *host_cr3_va, *msr_bitmap;
+ 	struct depriv_loaded_vmcs *loaded_vmcs = NULL;
+ 
+-	preempt_disable();
+-	local_irq_save(flags);
+-
+ 	// memory for root mode VM exit handler
+ 	page = __alloc_pages_node(cpu_to_node(cpu), GFP_KERNEL, DEPRIV_CPU_STATE_PAGE_ORDER);
+ 	if (!page) {
+@@ -867,14 +864,12 @@ static void vmx_depriv_cpu(void *info)
+ 	}
+ 
+ 	/* switching to non-root mode */
+-	if (!__vmx_depriv(true)) {
+-		pr_err("depriv: cpu%d failed to deprivilege\n", cpu);
+-		//__hardware_disable();
+-	}
++	if (__vmx_depriv(true))
++		return;
+ 
+ error:
+-	local_irq_restore(flags);
+-	preempt_enable();
++	pr_err("depriv: cpu%d failed to deprivilege\n", cpu);
++	//__hardware_disable();
+ }
+ 
+ static void vmx_repriv_cpu_crs(void)
+@@ -1045,18 +1040,15 @@ static inline void __vmx_repriv(void)
+ static void vmx_repriv(void)
+ {
+ 	int cpu;
+-	unsigned long flags, root_mode_rsp;
++	unsigned long root_mode_rsp;
+ 	bool *in_depriv_switch;
+ 
+ 	if (test_handle_invalid_host_state || test_handle_invalid_guest_state)
+ 		goto out;
+ 
+-	preempt_disable();
+-	local_irq_save(flags);
+-
+ 	cpu = raw_smp_processor_id();
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+-		goto out_irq;
++		goto out;
+ 
+ 	root_mode_rsp = (unsigned long)per_cpu(depriv_cpu_state, cpu) + PAGE_SIZE
+ 			- DEPRIV_HOST_STACK_RESERVED_BYTES;
+@@ -1065,9 +1057,6 @@ static void vmx_repriv(void)
+ 	*in_depriv_switch = true;
+ 	__vmx_repriv();
+ 	*in_depriv_switch = false;
+-out_irq:
+-	local_irq_restore(flags);
+-	preempt_enable();
+ out:
+ 	return;
+ }
+@@ -1314,18 +1303,15 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ static bool vmx_depriv(void)
+ {
+ 	int cpu;
+-	unsigned long flags, root_mode_rsp;
++	unsigned long root_mode_rsp;
+ 	bool *in_depriv_switch, r = false;
+ 
+ 	if (test_handle_invalid_host_state || test_handle_invalid_guest_state)
+ 		goto out;
+ 
+-	preempt_disable();
+-	local_irq_save(flags);
+-
+ 	cpu = raw_smp_processor_id();
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+-		goto out_irq;
++		goto out;
+ 
+ 	root_mode_rsp = (unsigned long)per_cpu(depriv_cpu_state, cpu) + PAGE_SIZE
+ 			- DEPRIV_HOST_STACK_RESERVED_BYTES;
+@@ -1339,9 +1325,6 @@ static bool vmx_depriv(void)
+ 	r = __vmx_depriv(false);
+ 	*in_depriv_switch = false;
+ 
+-out_irq:
+-	local_irq_restore(flags);
+-	preempt_enable();
+ out:
+ 	return r;
+ }
+-- 
+2.34.1
+

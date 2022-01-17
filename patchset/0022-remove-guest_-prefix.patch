@@ -1,0 +1,184 @@
+From 4e838acc6f2b48837f2a2b069a419ea29e9959f8 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 13 Jun 2020 20:46:41 -0700
+Subject: [PATCH 022/140] remove guest_ prefix
+
+---
+ arch/x86/kvm/vmx/depriv.c | 80 +++++++++++++++++++--------------------
+ 1 file changed, 40 insertions(+), 40 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index a2fc1fbcbd60..246542d511e5 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1106,26 +1106,26 @@ static void vmx_repriv_cpu_crs(void)
+ 	unsigned long host_cr0 = read_cr0();
+ 	unsigned long host_cr3 = __read_cr3();
+ 	unsigned long host_cr4 = __read_cr4();
+-	unsigned long guest_cr0 = vmcs_readl(GUEST_CR0);
+-	unsigned long guest_cr3 = vmcs_readl(GUEST_CR3);
+-	unsigned long guest_cr4 = vmcs_readl(GUEST_CR4);
++	unsigned long cr0 = vmcs_readl(GUEST_CR0);
++	unsigned long cr3 = vmcs_readl(GUEST_CR3);
++	unsigned long cr4 = vmcs_readl(GUEST_CR4);
+ 
+-	if (host_cr0 != guest_cr0) {
++	if (host_cr0 != cr0) {
+ 		pr_info("depriv: repriv cpu%d cr0 %#lx : %#lx : %#lx\n",
+-			cpu, host_cr0, vmcs_readl(HOST_CR0), guest_cr0);
+-		write_cr0(guest_cr0);
+-		vmcs_writel(HOST_CR0, guest_cr0);
++			cpu, host_cr0, vmcs_readl(HOST_CR0), cr0);
++		write_cr0(cr0);
++		vmcs_writel(HOST_CR0, cr0);
+ 	}
+ 
+-	if (host_cr3 != guest_cr3) {
++	if (host_cr3 != cr3) {
+ 		pr_info("depriv: repriv cpu%d cr3 %#lx : %#lx\n",
+-			cpu, host_cr3, guest_cr3);
++			cpu, host_cr3, cr3);
+ 	}
+ 
+-	if (host_cr4 != guest_cr4) {
++	if (host_cr4 != cr4) {
+ 		pr_info("depriv: repriv cpu%d cr4 %#lx : %#lx : %#lx\n",
+-			cpu, host_cr4, vmcs_readl(HOST_CR4), guest_cr4);
+-		vmcs_writel(HOST_CR4, guest_cr4);
++			cpu, host_cr4, vmcs_readl(HOST_CR4), cr4);
++		vmcs_writel(HOST_CR4, cr4);
+ 	}
+ }
+ 
+@@ -1156,7 +1156,7 @@ static inline void vmx_repriv_cpu_misc(void)
+ static inline void vmx_repriv_cpu_segments(void)
+ {
+ 	int cpu = smp_processor_id();
+-	unsigned long host_base, guest_base;
++	unsigned long host_base, base;
+ 	u32 ar;
+ 	u16 sel;
+ 
+@@ -1173,9 +1173,9 @@ static inline void vmx_repriv_cpu_segments(void)
+ 	}
+ 
+ 	host_base = read_msr(MSR_FS_BASE);
+-	guest_base = vmcs_readl(GUEST_FS_BASE);
++	base = vmcs_readl(GUEST_FS_BASE);
+ 	pr_info("depriv: repriv cpu%d FS base %#lx : %#lx\n",
+-		cpu, host_base, guest_base);
++		cpu, host_base, base);
+ 
+ 	// never change GS BASE, which points to kernel mode per-CPU data
+ 	ar = vmcs_read32(GUEST_GS_AR_BYTES);
+@@ -1188,52 +1188,52 @@ static inline void vmx_repriv_cpu_segments(void)
+ 	}
+ 
+ 	host_base = read_msr(MSR_GS_BASE);
+-	guest_base = vmcs_readl(GUEST_GS_BASE);
++	base = vmcs_readl(GUEST_GS_BASE);
+ 	pr_info("depriv: repriv cpu%d GS base %#lx : %#lx\n",
+-		cpu, host_base, guest_base);
++		cpu, host_base, base);
+ }
+ 
+ static inline void vmx_repriv_cpu_ldtr(void)
+ {
+ 	int cpu = smp_processor_id();
+-	u16 guest_ldtr = vmcs_read16(GUEST_LDTR_SELECTOR), host_ldtr;
++	u16 ldtr = vmcs_read16(GUEST_LDTR_SELECTOR), host_ldtr;
+ 
+ 	store_ldt(host_ldtr);
+-	if (host_ldtr != guest_ldtr) {
++	if (host_ldtr != ldtr) {
+ 		pr_info("depriv: repriv cpu%d LDTR mismatch %#x : %#x\n",
+-			cpu, host_ldtr, guest_ldtr);
+-		load_ldt(guest_ldtr);
++			cpu, host_ldtr, ldtr);
++		load_ldt(ldtr);
+ 	}
+ }
+ 
+ static inline void vmx_repriv_cpu_tr(void)
+ {
+ 	int cpu = smp_processor_id();
+-	u16 guest_tr = vmcs_read16(GUEST_TR_SELECTOR), host_tr;
++	u16 tr = vmcs_read16(GUEST_TR_SELECTOR), host_tr;
+ 
+ 	store_tr(host_tr);
+-	if (host_tr != guest_tr) {
++	if (host_tr != tr) {
+ 		pr_info("depriv: repriv cpu%d TR mismatch %#x : %#x\n",
+-			cpu, host_tr, guest_tr);
+-		if (guest_tr == 0)
++			cpu, host_tr, tr);
++		if (tr == 0)
+ 			return;
+-		load_tr(guest_tr);
+-		vmcs_write16(HOST_TR_SELECTOR, guest_tr);
++		load_tr(tr);
++		vmcs_write16(HOST_TR_SELECTOR, tr);
+ 	}
+ }
+ 
+ #define REPRIV_DESC_TABLE(tag, TAG) do {						\
+ 	store_##tag##dt(&host_dt);							\
+-	guest_dt_base = vmcs_readl(GUEST_##TAG##DTR_BASE);				\
+-	if (host_dt.address != guest_dt_base)						\
++	dt_base = vmcs_readl(GUEST_##TAG##DTR_BASE);					\
++	if (host_dt.address != dt_base)							\
+ 		pr_err("depriv: repriv cpu%d " #tag "dt base mismatch %#lx : %#lx\n",	\
+-		       cpu, host_dt.address, guest_dt_base);				\
+-	vmcs_writel(HOST_##TAG##DTR_BASE, guest_dt_base);				\
+-	guest_dt_limit = vmcs_read32(GUEST_##TAG##DTR_LIMIT);				\
+-	if (host_dt.size != guest_dt_limit) {						\
++		       cpu, host_dt.address, dt_base);					\
++	vmcs_writel(HOST_##TAG##DTR_BASE, dt_base);					\
++	dt_limit = vmcs_read32(GUEST_##TAG##DTR_LIMIT);					\
++	if (host_dt.size != dt_limit) {							\
+ 		pr_debug("depriv: repriv cpu%d " #tag "dt limit mismatch %#x : %#x\n",	\
+-			 cpu, host_dt.size , guest_dt_limit);				\
+-		host_dt.size = guest_dt_limit;						\
++			 cpu, host_dt.size , dt_limit);					\
++		host_dt.size = dt_limit;						\
+ 		load_##tag##dt(&host_dt);						\
+ 	}										\
+ } while (0)
+@@ -1242,8 +1242,8 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ {
+ 	int cpu = smp_processor_id();
+ 	struct desc_ptr host_dt;
+-	unsigned long guest_dt_base;
+-	u32 guest_dt_limit;
++	unsigned long dt_base;
++	u32 dt_limit;
+ 
+ 	REPRIV_DESC_TABLE(g, G);
+ 	REPRIV_DESC_TABLE(i, I);
+@@ -1313,12 +1313,12 @@ static void vmx_repriv_cpu_state(void)
+  * if guest_rip is a user level virtual address then it's mostly not valid in
+  * root mode, because it is mapped using non-root mode cr3 and page tables.
+  */
+-static void dump_guest_insn(unsigned long guest_rip, int insn_len, char *insn)
++static void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ {
+ 	int i;
+ 
+ 	// don't try to access user level virtual address
+-	if (!(guest_rip & 0xf000000000000000ul)) {
++	if (!(rip & 0xf000000000000000ul)) {
+ 		memset(insn, 0, MAX_INSN_SIZE * 3 + 1);
+ 		return;
+ 	}
+@@ -1327,7 +1327,7 @@ static void dump_guest_insn(unsigned long guest_rip, int insn_len, char *insn)
+ 		insn_len = MAX_INSN_SIZE;
+ 
+ 	for (i = 0; i < insn_len; i++)
+-		sprintf(insn + 3 * i, " %02x", *(u8 *)(guest_rip + i));
++		sprintf(insn + 3 * i, " %02x", *(u8 *)(rip + i));
+ 	insn[3 * i] = '\0';
+ }
+ 
+-- 
+2.34.1
+

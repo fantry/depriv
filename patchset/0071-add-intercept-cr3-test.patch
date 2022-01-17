@@ -1,0 +1,22 @@
+From 395a2f5eb6e0cf9c70462cda30dd34ecfe2d334f Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 20 Jun 2020 10:33:56 -0700
+Subject: [PATCH 071/140] add intercept cr3 test
+
+---
+ arch/x86/kvm/vmx/test_depriv.sh | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/x86/kvm/vmx/test_depriv.sh b/arch/x86/kvm/vmx/test_depriv.sh
+index cb60d0c17f35..deea9f2c1f47 100755
+--- a/arch/x86/kvm/vmx/test_depriv.sh
++++ b/arch/x86/kvm/vmx/test_depriv.sh
+@@ -1,4 +1,5 @@
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel intercept_msr=1
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel intercept_cr3=1
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel exception_bitmap=0x4000
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel exception_bitmap=0x2000
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_vmlaunch_failure=1
+-- 
+2.34.1
+

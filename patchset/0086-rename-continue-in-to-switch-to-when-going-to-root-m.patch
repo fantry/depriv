@@ -1,0 +1,248 @@
+From 7b977a507ef62fcc310920c78ccd2ae483a455f1 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 23 Jun 2020 09:45:01 -0700
+Subject: [PATCH 086/140] rename "continue in" to "switch to" when going to
+ root mode
+
+---
+ arch/x86/entry/entry_64.S       |  6 ++---
+ arch/x86/kvm/vmx/depriv.c       | 42 +++++++++++++++++++--------------
+ arch/x86/kvm/vmx/depriv_entry.S | 20 ++++++++--------
+ 3 files changed, 37 insertions(+), 31 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 5d9eecccba47..0ae83fce34fc 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1414,7 +1414,7 @@ nmi_restore:
+ 	iretq
+ SYM_CODE_END(asm_exc_nmi)
+ 
+-SYM_CODE_START(depriv_continue_in_root_mode)
++SYM_CODE_START(depriv_switch_to_root_mode)
+ 	push	%rax
+ 
+ 	/*
+@@ -1425,8 +1425,8 @@ SYM_CODE_START(depriv_continue_in_root_mode)
+ 
+ 	pop	%rax
+ 	iretq
+-SYM_CODE_END(depriv_continue_in_root_mode)
+-EXPORT_SYMBOL(depriv_continue_in_root_mode)
++SYM_CODE_END(depriv_switch_to_root_mode)
++EXPORT_SYMBOL(depriv_switch_to_root_mode)
+ 
+ #ifndef CONFIG_IA32_EMULATION
+ /*
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 9e84d6381bec..484b121c54a5 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -59,7 +59,7 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ #define DEPRIV_HOST_STACK_RESERVED_BYTES (16 * 8)
+ 
+ #define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(0 * 8)
+-#define DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE	(1 * 8)
++#define DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE	(1 * 8)
+ #define DEPRIV_HOST_STACK_IRET_STACK		(2 * 8)
+ 
+ #define DEPRIV_IRET_STACK_GUEST_RIP		(0 * 8)
+@@ -416,8 +416,7 @@ static void vmx_depriv_cpu_tr(unsigned long gdt_base)
+ 	if ((ar & VMX_AR_TYPE_MASK) != VMX_AR_TYPE_BUSY_64_TSS) {
+ 		pr_err("depriv: cpu%d tr ar %#x, fix it up\n", cpu, ar);
+ 		vmcs_write32(GUEST_TR_AR_BYTES,
+-			     (ar & ~VMX_AR_TYPE_MASK) |
+-			     VMX_AR_TYPE_BUSY_64_TSS);
++			     (ar & ~VMX_AR_TYPE_MASK) | VMX_AR_TYPE_BUSY_64_TSS);
+ 	}
+ }
+ 
+@@ -602,8 +601,10 @@ static void vmx_depriv_cpu(void *info)
+ 	if (test_early_invalid_state && test_handle_invalid_host_state)
+ 		vmcs_write32(CR3_TARGET_COUNT, 0x100000);
+ 
+-	if (test_early_invalid_state && test_handle_invalid_guest_state)
+-		vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
++	if (test_early_invalid_state && test_handle_invalid_guest_state) {
++		u32 ar = vmcs_read32(GUEST_TR_AR_BYTES);
++		vmcs_write32(GUEST_TR_AR_BYTES, ar | VMX_AR_S_MASK);
++	}
+ 
+ 	/*
+ 	 * Should we save/restore general purpose registers around vmx_depriv?
+@@ -786,7 +787,7 @@ void vmx_repriv_cpu(void *info)
+ 	to_root_mode = (int *)(host_cpu_state +
+ 			       DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
+ 			       DEPRIV_HOST_STACK_RESERVED_BYTES +
+-			       DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
++			       DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE);
+ 
+ 	++(*to_root_mode);
+ 
+@@ -831,7 +832,7 @@ void dump_va_page_table_entry(unsigned long va);
+ 	DEPRIV_IRET_STACK_CR3		= vmcs_readl(GUEST_CR3);		\
+ } while (0)
+ 
+-void depriv_continue_in_root_mode(void);
++void depriv_switch_to_root_mode(void);
+ 
+ static void vmx_depriv_debug_with_non_root_mode(void)
+ {
+@@ -841,7 +842,7 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ 	u16 seg;
+ 	bool is_segment = true;
+ 
+-	vmcs_writel(GUEST_RIP, (unsigned long)depriv_continue_in_root_mode);
++	vmcs_writel(GUEST_RIP, (unsigned long)depriv_switch_to_root_mode);
+ 
+ 	seg = vmcs_read16(HOST_CS_SELECTOR);
+ 	vmcs_write16(GUEST_CS_SELECTOR, seg);
+@@ -859,8 +860,10 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ 	if (test_handle_invalid_host_state)
+ 		vmcs_write32(CR3_TARGET_COUNT, 0);
+ 
+-	if (test_handle_invalid_guest_state)
+-		vmcs_write32(GUEST_TR_AR_BYTES, 0x008b);
++	if (test_handle_invalid_guest_state) {
++		u32 ar = vmcs_read32(GUEST_TR_AR_BYTES);
++		vmcs_write32(GUEST_TR_AR_BYTES, ar & ~VMX_AR_S_MASK);
++	}
+ }
+ 
+ /*
+@@ -877,7 +880,6 @@ bool vmx_repriv_cpu_state(void)
+ 	vmx_repriv_cpu_sysenter_msrs();
+ 	vmx_repriv_cpu_desc_tables();
+ 
+-	cpumask_set_cpu(cpu, &depriv_cpu_root_mode_mask);
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK;
+ 	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_IRET_STACK) = iret_stack_base;
+ 
+@@ -890,6 +892,8 @@ bool vmx_repriv_cpu_state(void)
+ 		return false;
+ 	}
+ 
++	cpumask_set_cpu(cpu, &depriv_cpu_root_mode_mask);
++
+ 	/*
+ 	 * last step: overwrite GS base MSR with guest GS base
+ 	 */
+@@ -903,7 +907,7 @@ bool vmx_repriv_cpu_state(void)
+ 	return true;								\
+ } while (0)
+ 
+-#define DEPRIV_CONTINUE_IN_ROOT_MODE do {					\
++#define DEPRIV_SWITCH_TO_ROOT_MODE do {						\
+ 	return false;								\
+ } while (0)
+ 
+@@ -937,7 +941,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			regs[VCPU_REGS_RAX] = 2;
+ 
+ 		vmx_validate_guest_state();
+-		DEPRIV_CONTINUE_IN_ROOT_MODE;
++		DEPRIV_SWITCH_TO_ROOT_MODE;
+ 	}
+ 
+ 	if (!(counter % log_mod))
+@@ -959,8 +963,10 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			if (test_handle_invalid_host_state)
+ 				vmcs_write32(CR3_TARGET_COUNT, 0x100000);
+ 
+-			if (test_handle_invalid_guest_state)
+-				vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
++			if (test_handle_invalid_guest_state) {
++				u32 ar = vmcs_read32(GUEST_TR_AR_BYTES);
++				vmcs_write32(GUEST_TR_AR_BYTES, ar | VMX_AR_S_MASK);
++			}
+ 		}
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+@@ -969,7 +975,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	}
+ 
+ 	case EXIT_REASON_VMCALL: {
+-		int *to_root_mode = (int *)(host_rsp + DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
++		int *to_root_mode = (int *)(host_rsp + DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE);
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
+@@ -977,7 +983,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, continue in root mode\n",
+ 				cpu, counter, rip);
+ 			vmcs_writel(GUEST_RIP, rip + insn_len);
+-			DEPRIV_CONTINUE_IN_ROOT_MODE;
++			DEPRIV_SWITCH_TO_ROOT_MODE;
+ 		} else {
+ 			pr_debug("depriv: cpu%d (%ld) vmcall @ %#lx\n", cpu, counter, rip);
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+@@ -995,7 +1001,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		dump_guest_insn(rip, vmcs_read32(VM_EXIT_INSTRUCTION_LEN), insn);
+ 		pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx insn: %s\n",
+ 			cpu, counter, reason, rip, rsp, insn);
+-		DEPRIV_CONTINUE_IN_ROOT_MODE;
++		DEPRIV_SWITCH_TO_ROOT_MODE;
+ 	}
+ }
+ 
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index b0efb940220a..acba5d3c60f9 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -60,29 +60,29 @@
+ 
+ 	.text
+ 
+-SYM_CODE_START(vmx_depriv_continue_in_root_mode)
++SYM_CODE_START(vmx_depriv_switch_to_root_mode)
+ 	PUSH_AND_CLEAR_ALL
+ 
+ 	call vmx_repriv_cpu_state
+ 	cmpb $1, %al
+ 
++	POP_ALL
++
+ 	/*
+-	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
++	 * upon vmx_repriv_cpu_state returning true, %rax = 1
++	 * upon vmx_repriv_cpu_state returning false, %rax = 0
+ 	 */
+-	mov	$1, %rax
+-	mov	%rax, 0x88(%rsp)
+-
+-	POP_ALL
++	mov	%rax, 0x8(%rsp)
+ 
+ 	/*
+ 	 * switch to iret stack, which is mapped even in user space CR3
+ 	 */
+ 	mov	0x10(%rsp), %rsp
+ 
+-	je depriv_continue_in_root_mode
++	je depriv_switch_to_root_mode
+ 	vmresume
+ 	/* XXX what if vmresume fails? */
+-SYM_CODE_END(vmx_depriv_continue_in_root_mode)
++SYM_CODE_END(vmx_depriv_switch_to_root_mode)
+ 
+ SYM_FUNC_START(vmx_depriv)
+ 	/* assuming vmlaunch will succeed */
+@@ -122,7 +122,7 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	 * upon vmx_depriv_vmexit_handler returning false, switch back to root
+ 	 * mode with guest stack
+ 	 */
+-	jne vmx_depriv_continue_in_root_mode
++	jne vmx_depriv_switch_to_root_mode
+ 
+ 	/*
+ 	 * upon vmx_depriv_vmexit_handler returning true, continue non-root mode
+@@ -132,5 +132,5 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	/*
+ 	 * VM resume failed, switch back to root mode with guest stack
+ 	 */
+-	jmp vmx_depriv_continue_in_root_mode
++	jmp vmx_depriv_switch_to_root_mode
+ SYM_FUNC_END(vmx_depriv_vmexit)
+-- 
+2.34.1
+

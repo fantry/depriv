@@ -1,0 +1,112 @@
+From 5688f963881dc9395ff7bdbfba1ed55a4db50620 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 16:48:06 -0700
+Subject: [PATCH 041/140] don't do vmcall again to switch to root mode when
+ already in root mode
+
+---
+ arch/x86/entry/entry_64.S |  3 +++
+ arch/x86/kvm/vmx/depriv.c | 35 +++++++++++++++--------------------
+ 2 files changed, 18 insertions(+), 20 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 21247bb246ea..6a0b0784a45c 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1433,6 +1433,9 @@ SYM_CODE_START(depriv_continue_in_root_mode)
+ 	movl	0x4c(%rsp), %edx
+ 	wrmsr
+ 
++	mov	$1, %eax
++	movl	%eax, 0x60(%rsp)
++
+ 	pop	%rax
+ 	pop	%rcx
+ 	pop	%rdx
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index ff5ada334de1..5a02860a0c57 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -949,14 +949,14 @@ static void vmx_repriv_cpu_release_resources(void)
+ 		per_cpu(depriv_cpu_state, cpu) = NULL;
+ 		memset(host_cpu_state, 0, DEPRIV_CPU_STATE_BUFFER_SIZE);
+ 		free_pages((unsigned long)host_cpu_state, DEPRIV_CPU_STATE_PAGE_ORDER);
+-		pr_info("depriv: repriv cpu%d released cpu state buffer\n", cpu);
++		pr_debug("depriv: repriv cpu%d released cpu state buffer\n", cpu);
+ 	}
+ 
+ 	if (vmcs) {
+ 		per_cpu(depriv_vmcs, cpu) = NULL;
+ 		vmcs_clear(vmcs);
+ 		free_vmcs(vmcs);
+-		pr_info("depriv: repriv cpu%d released root mode VMCS\n", cpu);
++		pr_debug("depriv: repriv cpu%d released root mode VMCS\n", cpu);
+ 	}
+ 
+ 	if (atomic_dec_and_test(&depriv_cpu_count))
+@@ -1139,7 +1139,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 	vmx_depriv_result = vmx_depriv(host_rsp);
+ 	if (!vmx_depriv_result) {
+ 		// continue in non-root mode...
+-		bool *to_root_mode = (bool *)(host_rsp + DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
++		int *to_root_mode = (int *)(host_rsp + DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
+ 		unsigned long fs_base;
+ 
+ 		asm volatile("mov %%rsp,%0" : "=m"(rsp));
+@@ -1153,7 +1153,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 
+ 		atomic_inc(&depriv_cpu_count);
+ 
+-		*to_root_mode = false;
++		*to_root_mode = 0;
+ 		fs_base = read_msr(MSR_FS_BASE);
+ 
+ 		loadsegment(fs, __KERNEL_DS);
+@@ -1325,25 +1325,20 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ static void vmx_repriv_cpu(void *info)
+ {
+ 	int cpu = smp_processor_id();
+-	struct vmcs *vmcs = per_cpu(depriv_vmcs, cpu);
+-	bool *to_root_mode;
++	int *to_root_mode = (int *)(per_cpu(depriv_cpu_state, cpu) +
++				    DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
++				    DEPRIV_HOST_STACK_RESERVED_BYTES +
++				    DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
+ 
+-	pr_info("depriv: repriv cpu%d root mode VMCS %p\n", cpu, vmcs);
++	++(*to_root_mode);
+ 
+-	if (!vmcs) {
++	if (*to_root_mode == 1) {
++		vmx_depriv_vmcall();
++		// continue in root mode...
++		pr_info("depriv: cpu%d reprivileged\n", cpu);
++	} else
+ 		pr_info("depriv: cpu%d already reprivileged\n", cpu);
+-		return;
+-	}
+-
+-	to_root_mode = (bool *)(per_cpu(depriv_cpu_state, cpu) +
+-				DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
+-				DEPRIV_HOST_STACK_RESERVED_BYTES +
+-				DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
+-	*to_root_mode = true;
+-	vmx_depriv_vmcall();
+ 
+-	// continue in root mode...
+-	pr_info("depriv: cpu%d reprivileged\n", cpu);
+ 	vmx_repriv_cpu_release_resources();
+ }
+ 
+@@ -1684,7 +1679,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	}
+ 
+ 	case EXIT_REASON_VMCALL: {
+-		bool *to_root_mode = (bool *)(host_rsp + DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
++		int *to_root_mode = (int *)(host_rsp + DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
+-- 
+2.34.1
+

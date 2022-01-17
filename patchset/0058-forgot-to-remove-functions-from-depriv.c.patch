@@ -1,0 +1,122 @@
+From 5305c435e147d5e4ebfdcc662a9bc6d79858fd5c Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 18 Jun 2020 14:13:30 -0700
+Subject: [PATCH 058/140] forgot to remove functions from depriv.c
+
+---
+ arch/x86/kvm/vmx/depriv.c | 99 ---------------------------------------
+ 1 file changed, 99 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 0b701e237251..57e2cf164c32 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1285,105 +1285,6 @@ static void vmx_repriv_cpu_state(void)
+ 	return false;								\
+ } while (0)
+ 
+-/*
+- * if non-root mode rip is a user level virtual address then it's mostly not
+- * valid in root mode, because it is mapped using non-root mode cr3 and page
+- * tables.
+- */
+-static void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+-{
+-	int i;
+-
+-	// don't try to access user level virtual address
+-	if (!(rip & 0xf000000000000000ul)) {
+-		memset(insn, 0, MAX_INSN_SIZE * 3 + 1);
+-		return;
+-	}
+-
+-	if (insn_len == 0)
+-		insn_len = MAX_INSN_SIZE;
+-
+-	for (i = 0; i < insn_len; i++)
+-		sprintf(insn + 3 * i, " %02x", *(u8 *)(rip + i));
+-	insn[3 * i] = '\0';
+-}
+-
+-static void handle_cr3_access(unsigned long host_rsp, unsigned long *regs, unsigned long qualification)
+-{
+-	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
+-	int cpu = smp_processor_id();
+-	int reg = (qualification >> 8) & 0xf;
+-
+-	switch ((qualification >> 4) & 3) {
+-	case 0: { /* mov to cr */
+-		unsigned long cr3 = regs[reg];
+-		unsigned long cr4 = vmcs_readl(GUEST_CR4);
+-
+-		if (!(cr4 & X86_CR4_PCIDE))
+-			pr_debug("depriv: cpu%d (%ld) PCID disabled\n", cpu, *cnt);
+-		else
+-			pr_debug("depriv: cpu%d (%ld) PCID enabled\n", cpu, *cnt);
+-
+-		cr3 &= ~X86_CR3_PCID_NOFLUSH;
+-		vmcs_writel(GUEST_CR3, cr3);
+-
+-		pr_debug("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx)\n",
+-			 cpu, *cnt, reg, cr3, regs[reg]);
+-		break;
+-	}
+-	case 1: /*mov from cr*/
+-		regs[reg] = vmcs_readl(GUEST_CR3);
+-
+-		/* XXX RSP in regs won't be loaded into non-root mode */
+-		if (reg == VCPU_REGS_RSP)
+-			vmcs_writel(GUEST_RSP, regs[reg]);
+-
+-		pr_debug("depriv: cpu%d (%ld) read cr3 to reg%d: %#lx\n",
+-			 cpu, *cnt, reg, regs[reg]);
+-		break;
+-	}
+-}
+-
+-static void handle_cr4_access(unsigned long host_rsp, unsigned long *regs, unsigned long qualification)
+-{
+-	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
+-	int cpu = smp_processor_id();
+-	int reg = (qualification >> 8) & 0xf;
+-
+-	switch ((qualification >> 4) & 3) {
+-	case 0: { /* mov to cr */
+-		unsigned long val = regs[reg];
+-		unsigned long cr4 = vmcs_readl(GUEST_CR4);
+-
+-		if ((val ^ cr4) & X86_CR4_SMEP) {
+-			if (val & X86_CR4_SMEP) {
+-				pr_err("depriv: cpu%d (%ld) setting SMEP\n", cpu, *cnt);
+-			} else {
+-				pr_err("depriv: cpu%d (%ld) clearing SMEP\n", cpu, *cnt);
+-				val |= X86_CR4_SMEP;
+-			}
+-		}
+-
+-		vmcs_writel(CR4_READ_SHADOW, val);
+-		vmcs_writel(GUEST_CR4, val);
+-
+-		pr_info("depriv: cpu%d (%ld) wrote cr4 from reg%d: %#lx (%#lx)\n",
+-			cpu, *cnt, reg, val, regs[reg]);
+-		break;
+-	}
+-	case 1: /*mov from cr*/
+-		regs[reg] = vmcs_readl(GUEST_CR4);
+-
+-		/* XXX RSP in regs won't be loaded into non-root mode */
+-		if (reg == VCPU_REGS_RSP)
+-			vmcs_writel(GUEST_RSP, regs[reg]);
+-
+-		pr_info("depriv: cpu%d (%ld) read cr4 to reg%d: %#lx\n",
+-			cpu, *cnt, reg, regs[reg]);
+-		break;
+-	}
+-}
+-
+ extern int vmx_depriv_handle(u32 reason, unsigned long *regs, unsigned long cnt);
+ 
+ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+-- 
+2.34.1
+

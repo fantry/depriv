@@ -1,0 +1,75 @@
+From f7efe9cdb4899d6d71fd719a6161991f95506f8a Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 25 Jun 2020 10:58:00 -0700
+Subject: [PATCH 098/140] reduce logging, or it may crash the module
+
+---
+ arch/x86/kvm/vmx/depriv_handler.c | 25 +++++++++++++++----------
+ 1 file changed, 15 insertions(+), 10 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv_handler.c b/arch/x86/kvm/vmx/depriv_handler.c
+index 9a12fe683cf3..6155cb358eeb 100644
+--- a/arch/x86/kvm/vmx/depriv_handler.c
++++ b/arch/x86/kvm/vmx/depriv_handler.c
+@@ -126,6 +126,9 @@ static void handle_cr3_access(unsigned long *regs, unsigned long cnt)
+ 		cr3 &= ~X86_CR3_PCID_NOFLUSH;
+ 		vmcs_writel(GUEST_CR3, cr3);
+ 
++		if (cnt % 100)
++			break;
++
+ 		pr_info("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx)\n",
+ 			cpu, cnt, reg, cr3, regs[reg]);
+ 		break;
+@@ -137,6 +140,9 @@ static void handle_cr3_access(unsigned long *regs, unsigned long cnt)
+ 		if (reg == VCPU_REGS_RSP)
+ 			vmcs_writel(GUEST_RSP, regs[reg]);
+ 
++		if (cnt % 100)
++			break;
++
+ 		pr_info("depriv: cpu%d (%ld) read cr3 to reg%d: %#lx\n",
+ 			cpu, cnt, reg, regs[reg]);
+ 		break;
+@@ -199,20 +205,18 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 	if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
+ 		error_code = vmcs_read32(VM_EXIT_INTR_ERROR_CODE);
+ 
+-	pr_info("depriv: cpu%d (%ld) intr info: %#x error code: %#x\n",
+-		cpu, cnt, intr_info, error_code);
+-
+ 	insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 	dump_guest_insn(rip, insn_len, insn);
+ 
+ 	if (is_page_fault(intr_info)) {
+ 		unsigned long cr2 = vmcs_readl(EXIT_QUALIFICATION);
+-		pr_info("depriv: cpu%d (%ld) page fault @ %#lx with error code %#x\n",
+-			cpu, cnt, cr2, error_code);
+-		pr_info("depriv: cpu%d (%ld) rip: %#lx rsp: %#lx insn: %s\n",
+-			cpu, cnt, rip, rsp, insn);
++		if (!(cnt % 100))
++			pr_info("depriv: cpu%d (%ld) page fault @ %#lx with error code %#x "
++				"rip: %#lx rsp: %#lx insn: %s\n",
++				cpu, cnt, cr2, error_code, rip, rsp, insn);
+ 		native_write_cr2(cr2);
+-		dump_va_page_table_entry(cr2);
++		if (false)
++			dump_va_page_table_entry(cr2);
+ 		continue_in_root_mode = false;
+ 	} else if (is_gp_fault(intr_info))
+ 		continue_in_root_mode = false;
+@@ -221,8 +225,9 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 	else if (is_machine_check(intr_info) || is_nmi(intr_info))
+ 		pr_info("depriv: cpu%d (%ld) to handle NMI in root mode\n", cpu, cnt);
+ 	else
+-		pr_info("depriv: cpu%d (%ld) hit exception %d @ rip %#lx insn: %s\n",
+-			cpu, cnt, vector, rip, insn);
++		pr_info("depriv: cpu%d (%ld) hit exception %d @ rip %#lx with error code %#x "
++			"insn: %s\n",
++			cpu, cnt, vector, rip, error_code, insn);
+ 
+ 	if (continue_in_root_mode) {
+ 		pr_info("depriv: cpu%d (%ld) switch to root mode to handle exception %d\n",
+-- 
+2.34.1
+

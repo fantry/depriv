@@ -1,0 +1,40 @@
+From f20ab61606efe84652bf86fc9ed133e73c6307dd Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 25 Jun 2020 02:27:04 -0700
+Subject: [PATCH 097/140] fix the 1st VM resume
+
+---
+ arch/x86/kvm/vmx/depriv.c | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index bd3f72fe091b..251ea832fde6 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -628,17 +628,19 @@ static void vmx_depriv_cpu(void *info)
+ 		// switched to non-root mode
+ 		return;
+ 
+-	vmx_validate_guest_state();
+-
+ 	// still in root mode
+ 	if (vmx_depriv_result == 1)
+ 		pr_err("depriv: cpu%d launch failed\n", cpu);
+-	else if (vmx_depriv_result == 2)
++	else if (vmx_depriv_result == 2) {
+ 		pr_err("depriv: cpu%d resume failed\n", cpu);
+-	else
++		// skip the following vmx_repriv_cpu_release_resources()
++		return;
++	} else
+ 		pr_err("depriv: cpu%d unknown deprivilege error %d\n",
+ 		       cpu, vmx_depriv_result);
+ 
++	vmx_validate_guest_state();
++
+ error:
+ 	vmx_repriv_cpu_release_resources();
+ }
+-- 
+2.34.1
+

@@ -1,0 +1,36 @@
+From f9b64d4c7c854236be82ae666b3468fe419c24c0 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 23 Jun 2020 10:00:49 -0700
+Subject: [PATCH 088/140] update test script
+
+---
+ arch/x86/kvm/vmx/test_depriv.sh | 10 +++++++++-
+ 1 file changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kvm/vmx/test_depriv.sh b/arch/x86/kvm/vmx/test_depriv.sh
+index deea9f2c1f47..160c6b9404ee 100755
+--- a/arch/x86/kvm/vmx/test_depriv.sh
++++ b/arch/x86/kvm/vmx/test_depriv.sh
+@@ -1,10 +1,18 @@
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel intercept_msr=1
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel intercept_cr3=1
++
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel exception_bitmap=0x4000
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel exception_bitmap=0x2000
+-sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_vmlaunch_failure=1
++
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_invalid_host_state=1
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_invalid_guest_state=1
+ 
++#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_early_invalid_state=0 test_handle_invalid_host_state=1
++#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_early_invalid_state=0 test_handle_invalid_guest_state=1
++
++#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_early_invalid_state=0 test_handle_invalid_host_state=1 debug_host_in_non_root_mode=1
++#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_early_invalid_state=0 test_handle_invalid_guest_state=1 debug_host_in_non_root_mode=1
++
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel call_extra_exit_handlers=0
+ sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel
+-- 
+2.34.1
+

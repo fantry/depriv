@@ -1,0 +1,58 @@
+From 721799c97383111f51588f75c7023eb62aafa93b Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Fri, 4 Sep 2020 00:00:17 -0700
+Subject: [PATCH 105/140] must enter before switch to, or will see null
+ pointers
+
+---
+ arch/x86/include/asm/switch_to.h | 2 +-
+ arch/x86/kvm/vmx/depriv.c        | 5 ++---
+ 2 files changed, 3 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/include/asm/switch_to.h b/arch/x86/include/asm/switch_to.h
+index f13184f9ad6f..3b813609c2a3 100644
+--- a/arch/x86/include/asm/switch_to.h
++++ b/arch/x86/include/asm/switch_to.h
+@@ -48,8 +48,8 @@ struct fork_frame {
+ #define switch_to(prev, next, last)					\
+ do {									\
+ 	depriv_exit();							\
+-	((last) = __switch_to_asm((prev), (next)));			\
+ 	depriv_enter();							\
++	((last) = __switch_to_asm((prev), (next)));			\
+ } while (0)
+ 
+ #ifdef CONFIG_X86_32
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 49e2640f1338..12ffed7dfde7 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -537,8 +537,6 @@ void vmx_depriv_rip(void);
+ 
+ void vmx_validate_guest_state(void);
+ 
+-static atomic64_t depriv_enter_count;
+-
+ /*
+  * WARNING: must be called with interrupt disabled!
+  */
+@@ -546,6 +544,7 @@ static bool __vmx_depriv_enter(bool launch)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	unsigned long rip, rsp, rflags;
++	static atomic64_t depriv_enter_count;
+ 	long c;
+ 	int depriv_result;
+ 
+@@ -565,7 +564,7 @@ static bool __vmx_depriv_enter(bool launch)
+ 	vmcs_writel(GUEST_RFLAGS, rflags);
+ 
+ 	c = atomic64_inc_return(&depriv_enter_count);
+-	if (!(c % log_mod))
++	if (launch || !(c % log_mod))
+ 		pr_info("depriv: cpu%d (%ld) deprivileging: rip: %#lx rsp: %#lx\n", cpu, c, rip, rsp);
+ 
+ 	/*
+-- 
+2.34.1
+

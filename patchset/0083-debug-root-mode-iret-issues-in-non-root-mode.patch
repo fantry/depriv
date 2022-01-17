@@ -1,0 +1,176 @@
+From c7ad25d1ef8c9c47f5adcc731a15ae6a58d46bc7 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Mon, 22 Jun 2020 12:35:17 -0700
+Subject: [PATCH 083/140] debug root mode iret issues in non-root mode
+
+---
+ arch/x86/kvm/vmx/depriv.c       | 68 ++++++++++++++++++++++++++++-----
+ arch/x86/kvm/vmx/depriv_entry.S |  5 ++-
+ 2 files changed, 62 insertions(+), 11 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 587112dc8b45..696979e31d81 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -58,6 +58,7 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ #define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(0 * 8)
+ #define DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE	(1 * 8)
+ #define DEPRIV_HOST_STACK_IRET_STACK		(2 * 8)
++#define DEPRIV_HOST_STACK_DEBUG_HOST		(3 * 8)
+ 
+ #define DEPRIV_IRET_STACK_GUEST_RIP		(0 * 8)
+ #define DEPRIV_IRET_STACK_GUEST_CS		(1 * 8)
+@@ -814,6 +815,7 @@ static void dump_va_page_table_entry(void *virtual_address)
+ 	unsigned int va_shift = PGDIR_SHIFT;
+ 	bool host_pte_valid = true;
+ 	bool guest_pte_valid = true;
++	bool guest_sharing_host_pte = false;
+ 
+ 	pr_info("depriv: cpu%d  host cr3: 0x%016lx\n", cpu, host_cr3);
+ 	pr_info("depriv: cpu%d guest cr3: 0x%016lx\n", cpu, guest_cr3);
+@@ -829,12 +831,20 @@ static void dump_va_page_table_entry(void *virtual_address)
+ 			pr_info("depriv: cpu%d  host p%dd pte[%03d]: 0x%016lx\n",
+ 				cpu, i, slot, host_pte[slot]);
+ 
+-		if (guest_pte_valid)
++		if (!guest_sharing_host_pte && guest_pte_valid)
+ 			pr_info("depriv: cpu%d guest p%dd pte[%03d]: 0x%016lx\n",
+ 				cpu, i, slot, guest_pte[slot]);
+ 
+-		if (host_pte_valid && guest_pte_valid && host_pte[slot] != guest_pte[slot])
+-			pr_err("depriv: cpu%d mismatch pte at level %d\n", cpu, i);
++		if (host_pte_valid && !guest_sharing_host_pte && guest_pte_valid) {
++			if (host_pte[slot] != guest_pte[slot])
++				pr_err("depriv: cpu%d host/guest mismatch pte at level %d\n",
++				       cpu, i);
++			else {
++				pr_info("depriv: cpu%d guest shares host p%dd\n",
++					cpu, i - 1);
++				guest_sharing_host_pte = true;
++			}
++		}
+ 
+ 		if (host_pte_valid && host_pte[slot] & 0x1)
+ 			host_pte = __va(host_pte[slot] & CR3_ADDR_MASK);
+@@ -843,14 +853,16 @@ static void dump_va_page_table_entry(void *virtual_address)
+ 			host_pte_valid = false;
+ 		}
+ 
+-		if (guest_pte_valid && guest_pte[slot] & 0x1)
+-			guest_pte = __va(guest_pte[slot] & CR3_ADDR_MASK);
+-		else {
+-			pr_err("depriv: cpu%d guest pte missing at level %d\n", cpu, i);
+-			guest_pte_valid = false;
++		if (!guest_sharing_host_pte) {
++			if (guest_pte_valid && guest_pte[slot] & 0x1)
++				guest_pte = __va(guest_pte[slot] & CR3_ADDR_MASK);
++			else {
++				pr_err("depriv: cpu%d guest pte missing at level %d\n", cpu, i);
++				guest_pte_valid = false;
++			}
+ 		}
+ 
+-		if (!host_pte_valid && !guest_pte_valid)
++		if (!host_pte_valid && (guest_sharing_host_pte || !guest_pte_valid))
+ 			break;
+ 	}
+ }
+@@ -877,10 +889,12 @@ static void dump_va_page_table_entry(void *virtual_address)
+ 	DEPRIV_IRET_STACK_CR3		= vmcs_readl(GUEST_CR3);		\
+ } while (0)
+ 
++void depriv_continue_in_root_mode(void);
++
+ /*
+  * sync guest state to host w/o changing guest state
+  */
+-void vmx_repriv_cpu_state(void)
++bool vmx_repriv_cpu_state(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	unsigned long iret_stack_base = depriv_iret_stack_base(cpu);
+@@ -907,10 +921,41 @@ void vmx_repriv_cpu_state(void)
+ 
+ 	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_IRET_STACK) = iret_stack_base;
+ 
++	if (*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_DEBUG_HOST)) {
++		unsigned long gdt_base = vmcs_readl(HOST_GDTR_BASE), base;
++		struct desc_struct *dentry;
++		u16 seg;
++		bool is_segment = true;
++
++		vmcs_writel(GUEST_RIP, (unsigned long)depriv_continue_in_root_mode);
++
++		seg = vmcs_read16(HOST_CS_SELECTOR);
++		vmcs_write16(GUEST_CS_SELECTOR, seg);
++		DEPRIV_SELECTOR(CS, seg);
++
++		vmcs_writel(GUEST_RFLAGS, 0x2);
++		vmcs_writel(GUEST_RSP, iret_stack_base);
++
++		seg = vmcs_read16(HOST_SS_SELECTOR);
++		vmcs_write16(GUEST_SS_SELECTOR, seg);
++		DEPRIV_SELECTOR(SS, seg);
++
++		vmcs_writel(GUEST_CR3, vmcs_readl(HOST_CR3));
++
++		vmcs_write32(EXCEPTION_BITMAP, 0xffffffff);
++		vmcs_write32(GUEST_TR_AR_BYTES, 0x008b);
++
++		vmx_validate_guest_state();
++		dump_vmcs();
++
++		return false;
++	}
++
+ 	/*
+ 	 * last step: overwrite GS base MSR with guest GS base
+ 	 */
+ 	wrmsrl(MSR_GS_BASE, vmcs_readl(GUEST_GS_BASE));
++	return true;
+ }
+ 
+ #define DEPRIV_CONTINUE_IN_NON_ROOT_MODE(ins_len) do {				\
+@@ -960,6 +1005,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		pr_info("depriv: cpu%d (%ld) exit reason: %d cpu mask: %*pb[l]\n",
+ 			cpu, counter, reason, cpumask_pr_args(&depriv_cpu_root_mode_mask));
+ 
++	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_DEBUG_HOST) = 0;
++
+ 	switch (reason) {
+ 	case EXIT_REASON_CPUID: {
+ 		if (!(counter % log_mod))
+@@ -976,6 +1023,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 				cpu, counter, rip);
+ 			//vmcs_write32(CR3_TARGET_COUNT, 0x100000);
+ 			vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
++			*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_DEBUG_HOST) = 1;
+ 		}
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index 1fbb65a4bd42..b0efb940220a 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -64,6 +64,7 @@ SYM_CODE_START(vmx_depriv_continue_in_root_mode)
+ 	PUSH_AND_CLEAR_ALL
+ 
+ 	call vmx_repriv_cpu_state
++	cmpb $1, %al
+ 
+ 	/*
+ 	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
+@@ -78,7 +79,9 @@ SYM_CODE_START(vmx_depriv_continue_in_root_mode)
+ 	 */
+ 	mov	0x10(%rsp), %rsp
+ 
+-	jmp depriv_continue_in_root_mode
++	je depriv_continue_in_root_mode
++	vmresume
++	/* XXX what if vmresume fails? */
+ SYM_CODE_END(vmx_depriv_continue_in_root_mode)
+ 
+ SYM_FUNC_START(vmx_depriv)
+-- 
+2.34.1
+

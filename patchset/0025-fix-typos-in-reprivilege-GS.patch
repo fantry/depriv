@@ -1,0 +1,114 @@
+From cd93289a3aff8959a5b9774e9ac9b2a0eb20d05e Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 14 Jun 2020 01:58:32 -0700
+Subject: [PATCH 025/140] fix typos in reprivilege GS
+
+---
+ arch/x86/kvm/vmx/depriv.c | 46 ++++++++++++++++++++-------------------
+ 1 file changed, 24 insertions(+), 22 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index ec71a0061bba..8ce31ff2eaba 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1147,13 +1147,12 @@ static inline void vmx_repriv_cpu_misc(void)
+ 
+ #define REPRIV_SEGMENT(tag, TAG) do {					\
+ 	ar = vmcs_read32(GUEST_##TAG##S_AR_BYTES);			\
+-	if (ar & VMX_AR_UNUSABLE_MASK) {				\
++	if (ar & VMX_AR_UNUSABLE_MASK)					\
+ 		pr_info("depriv: cpu%d " #TAG "S unusable\n", cpu);	\
+-		break;							\
+-	}								\
+ 	sel = vmcs_read16(GUEST_##TAG##S_SELECTOR);			\
+ 	loadsegment(tag##s, sel);					\
+-	pr_debug("depriv: cpu%d " #TAG "S %#x\n", cpu, sel);		\
++	vmcs_write16(HOST_##TAG##S_SELECTOR, sel);			\
++	pr_info("depriv: cpu%d " #TAG "S %#x\n", cpu, sel);		\
+ } while (0)
+ 
+ static inline void vmx_repriv_cpu_segments(void)
+@@ -1167,28 +1166,31 @@ static inline void vmx_repriv_cpu_segments(void)
+ 	REPRIV_SEGMENT(e, E);
+ 
+ 	ar = vmcs_read32(GUEST_FS_AR_BYTES);
+-	if ((ar >> 16) & 0x1) {
++	if (ar & VMX_AR_UNUSABLE_MASK)
+ 		pr_info("depriv: repriv cpu%d FS unusable\n", cpu);
+-	} else {
+-		sel = vmcs_read16(GUEST_FS_SELECTOR);
+-		loadsegment(fs, sel);
+-		pr_info("depriv: repriv cpu%d FS = %#x\n", cpu, sel);
+-	}
++
++	sel = vmcs_read16(GUEST_FS_SELECTOR);
++	loadsegment(fs, sel);
++	pr_info("depriv: repriv cpu%d FS = %#x\n", cpu, sel);
++	vmcs_write16(HOST_FS_SELECTOR, sel);
+ 
+ 	host_base = read_msr(MSR_FS_BASE);
+ 	base = vmcs_readl(GUEST_FS_BASE);
+ 	pr_info("depriv: repriv cpu%d FS base %#lx : %#lx\n",
+ 		cpu, host_base, base);
++	if (host_base != base)
++		wrmsrl(MSR_FS_BASE, base);
++	vmcs_writel(HOST_FS_BASE, base);
+ 
+ 	// never change GS BASE, which points to kernel mode per-CPU data
+ 	ar = vmcs_read32(GUEST_GS_AR_BYTES);
+-	if ((ar >> 16) & 0x1) {
++	if (ar & VMX_AR_UNUSABLE_MASK)
+ 		pr_info("depriv: repriv cpu%d GS unusable\n", cpu);
+-	} else {
+-		sel = vmcs_read16(GUEST_FS_SELECTOR);
+-		load_gs_index(sel);
+-		pr_info("depriv: repriv cpu%d FS %#x\n", cpu, sel);
+-	}
++
++	sel = vmcs_read16(GUEST_GS_SELECTOR);
++	load_gs_index(sel);
++	pr_info("depriv: repriv cpu%d GS = %#x\n", cpu, sel);
++	vmcs_write16(HOST_GS_SELECTOR, sel);
+ 
+ 	host_base = read_msr(MSR_GS_BASE);
+ 	base = vmcs_readl(GUEST_GS_BASE);
+@@ -1337,7 +1339,7 @@ static void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ /*
+  * the following fs base sync logic is confusing, but it happens on nested
+  */
+-static void dump_fsgs_base(unsigned long host_rsp)
++static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ {
+ 	unsigned long *cnt = (unsigned long *)(host_rsp + 0x40);
+ 	int cpu = smp_processor_id();
+@@ -1346,14 +1348,14 @@ static void dump_fsgs_base(unsigned long host_rsp)
+ 	base = vmcs_readl(GUEST_FS_BASE);
+ 	last_base = *(unsigned long *)(host_rsp + 0x38);
+ 	if (base != last_base)
+-		pr_info("depriv: cpu%d (%ld) FS base %#lx <= %#lx\n",
+-			cpu, *cnt, base, last_base);
++		pr_info("depriv: cpu%d (%ld) exit reason %d FS base %#lx <= %#lx\n",
++			cpu, *cnt, reason, base, last_base);
+ 
+ 	base = vmcs_readl(GUEST_GS_BASE);
+ 	last_base = *(unsigned long *)(host_rsp + 0x30);
+ 	if (base != last_base)
+-		pr_info("depriv: cpu%d (%ld) GS base %#lx <= %#lx\n",
+-			cpu, *cnt, base, last_base);
++		pr_info("depriv: cpu%d (%ld) exit reason %d GS base %#lx <= %#lx\n",
++			cpu, *cnt, reason, base, last_base);
+ }
+ 
+ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+@@ -1383,7 +1385,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ 	(*cnt)++;
+ 
+-	dump_fsgs_base(host_rsp);
++	dump_fsgs_base(host_rsp, reason);
+ 
+ 	pr_debug("depriv: cpu%d exit reason:%#x rip:%#lx rsp:%#lx\n",
+ 		 cpu, reason, rip, rsp);
+-- 
+2.34.1
+

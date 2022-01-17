@@ -1,0 +1,120 @@
+From 0d79c9cbce53883f15b8e9b837228b59dfc0cc68 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 15 Sep 2020 19:23:35 -0700
+Subject: [PATCH 117/140] remove if it's in depriv switch
+
+---
+ arch/x86/depriv/vmx/depriv.c | 53 +++++++++---------------------------
+ 1 file changed, 13 insertions(+), 40 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 937d0f12a2bd..1fea304ac372 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -70,7 +70,6 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ 
+ #define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(0 * 8)
+ #define DEPRIV_HOST_STACK_IRET_STACK		(1 * 8)
+-#define DEPRIV_HOST_STACK_CONTEXT_SWITCH	(2 * 8)
+ 
+ #define DEPRIV_IRET_STACK_GUEST_RIP		(0 * 8)
+ #define DEPRIV_IRET_STACK_GUEST_CS		(1 * 8)
+@@ -1034,31 +1033,20 @@ static inline void __vmx_repriv(void)
+ 
+ fault:
+ 	pr_info("depriv: vmcall faulted, cpu%d already in root mode\n", cpu);
+-	return;
+ }
+ 
+ static void vmx_repriv(void)
+ {
+ 	int cpu;
+-	unsigned long root_mode_rsp;
+-	bool *in_depriv_switch;
+ 
+ 	if (test_handle_invalid_host_state || test_handle_invalid_guest_state)
+-		goto out;
++		return;
+ 
+ 	cpu = raw_smp_processor_id();
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+-		goto out;
+-
+-	root_mode_rsp = (unsigned long)per_cpu(depriv_cpu_state, cpu) + PAGE_SIZE
+-			- DEPRIV_HOST_STACK_RESERVED_BYTES;
+-	in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH);
++		return;
+ 
+-	*in_depriv_switch = true;
+ 	__vmx_repriv();
+-	*in_depriv_switch = false;
+-out:
+-	return;
+ }
+ 
+ static void vmx_repriv_cpu(void *info)
+@@ -1170,22 +1158,16 @@ bool vmx_repriv_cpu_state(void)
+ 
+ 	/* powerful switch to debug issues in non-root mode */
+ 	if (debug_host_in_non_root_mode) {
+-		void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+-		unsigned long root_mode_rsp = (unsigned long)host_cpu_state + PAGE_SIZE
+-						- DEPRIV_HOST_STACK_RESERVED_BYTES;
+-		bool in_depriv_switch = *((bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH));
+-
+-		if (!in_depriv_switch) {
+-			unsigned long rsp;
+-			asm volatile("mov %%rsp,%0" : "=m"(rsp));
+-			pr_info("depriv: cpu%d current rsp %#lx CS selector %x in %s\n",
+-				cpu, rsp, vmcs_read16(GUEST_CS_SELECTOR), __FUNCTION__);
+-
+-			vmx_depriv_debug_with_non_root_mode();
+-			if (debug_host_in_non_root_mode++ == 10)
+-				debug_host_in_non_root_mode = 0;
+-			return false;
+-		}
++		unsigned long rsp;
++
++		asm volatile("mov %%rsp,%0" : "=m"(rsp));
++		pr_info("depriv: cpu%d current rsp %#lx CS selector %x in %s\n",
++			cpu, rsp, vmcs_read16(GUEST_CS_SELECTOR), __FUNCTION__);
++
++		vmx_depriv_debug_with_non_root_mode();
++		if (debug_host_in_non_root_mode++ == 10)
++			debug_host_in_non_root_mode = 0;
++		return false;
+ 	}
+ 
+ 	if (depriv_exiting) {
+@@ -1303,8 +1285,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ static bool vmx_depriv(void)
+ {
+ 	int cpu;
+-	unsigned long root_mode_rsp;
+-	bool *in_depriv_switch, r = false;
++	bool r = false;
+ 
+ 	if (test_handle_invalid_host_state || test_handle_invalid_guest_state)
+ 		goto out;
+@@ -1313,18 +1294,10 @@ static bool vmx_depriv(void)
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+ 		goto out;
+ 
+-	root_mode_rsp = (unsigned long)per_cpu(depriv_cpu_state, cpu) + PAGE_SIZE
+-			- DEPRIV_HOST_STACK_RESERVED_BYTES;
+-	in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH);
+-
+-	*in_depriv_switch = true;
+-
+ 	// What else should we sync to non-root mode?
+ 	vmcs_writel(GUEST_CR3, __read_cr3());
+ 
+ 	r = __vmx_depriv(false);
+-	*in_depriv_switch = false;
+-
+ out:
+ 	return r;
+ }
+-- 
+2.34.1
+

@@ -1,0 +1,195 @@
+From 87aa67a1fbded9b6af50c9902534a13b14c841d0 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 25 Jun 2020 01:53:19 -0700
+Subject: [PATCH 096/140] release resources just before resuming
+
+---
+ arch/x86/kvm/vmx/depriv.c       | 85 ++++++++++++++-------------------
+ arch/x86/kvm/vmx/depriv_entry.S |  2 +-
+ 2 files changed, 37 insertions(+), 50 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 1ed0ec4ff395..bd3f72fe091b 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -60,8 +60,7 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ #define DEPRIV_HOST_STACK_RESERVED_BYTES	(16 * 8)
+ 
+ #define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(0 * 8)
+-#define DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE	(1 * 8)
+-#define DEPRIV_HOST_STACK_IRET_STACK		(2 * 8)
++#define DEPRIV_HOST_STACK_IRET_STACK		(1 * 8)
+ 
+ #define DEPRIV_IRET_STACK_GUEST_RIP		(0 * 8)
+ #define DEPRIV_IRET_STACK_GUEST_CS		(1 * 8)
+@@ -81,6 +80,8 @@ static atomic_t depriv_cpu_count;
+ static DEFINE_PER_CPU(struct vmcs *, depriv_vmcs);
+ static DEFINE_PER_CPU(void *, depriv_cpu_state);
+ 
++void dump_va_page_table_entry(unsigned long va);
++
+ static __init int adjust_vmx_controls(u32 ctl_min, u32 ctl_opt,
+ 				      u32 msr, u32 *result)
+ {
+@@ -791,37 +792,18 @@ void vmx_repriv_cpu(void *info)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+-	unsigned long *to_root_mode = NULL;
+ 
+-	pr_info("depriv: cpu%d reprivileging %p\n", cpu, host_cpu_state);
+-
+-	if (!host_cpu_state)
++	if (!host_cpu_state) {
++		pr_info("depriv: cpu%d alraedy reprivileged\n", cpu);
+ 		return;
++	}
+ 
+-	to_root_mode = (unsigned long *)(host_cpu_state +
+-					 DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
+-					 DEPRIV_HOST_STACK_RESERVED_BYTES +
+-					 DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE);
+-
+-	pr_info("depriv: cpu%d reprivileging %ld\n", cpu, *to_root_mode);
+-
+-	++(*to_root_mode);
+-
+-	pr_info("depriv: cpu%d reprivileging %ld\n", cpu, *to_root_mode);
+-
+-	if (*to_root_mode == 1) {
+-		vmx_depriv_vmcall();
+-
+-		// switched to root mode
+-		pr_info("depriv: cpu%d reprivileged\n", cpu);
+-	} else
+-		pr_info("depriv: cpu%d already reprivileged\n", cpu);
++	vmx_depriv_vmcall();
+ 
+-	vmx_repriv_cpu_release_resources();
++	// switched to root mode
++	pr_info("depriv: cpu%d reprivileged\n", cpu);
+ }
+ 
+-void dump_va_page_table_entry(unsigned long va);
+-
+ #define DEPRIV_IRET_STACK_RIP(base)						\
+ 	(*(unsigned long *)(base + DEPRIV_IRET_STACK_GUEST_RIP))
+ #define DEPRIV_IRET_STACK_CS(base)						\
+@@ -885,15 +867,12 @@ bool vmx_repriv_cpu_state(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	unsigned long stack = depriv_iret_trampoline_stack(cpu);
+-	unsigned long host_rsp = vmcs_readl(HOST_RSP);
+-	unsigned long *to_root_mode = NULL;
++	unsigned long cr3;
+ 
+ 	if (vmcs_read32(CR3_TARGET_COUNT) == DEPRIV_INVALID_HOST_CR3_TARGET_COUNT)
+ 		pr_err("depriv: cpu%d invalid host state @ rip: %#lx rsp: %#lx\n",
+ 		       cpu, vmcs_readl(GUEST_RIP), vmcs_readl(GUEST_RSP));
+ 
+-	to_root_mode = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE);
+-
+ 	vmx_repriv_cpu_crs();
+ 	vmx_repriv_cpu_misc();
+ 	vmx_repriv_cpu_sysenter_msrs();
+@@ -909,7 +888,6 @@ bool vmx_repriv_cpu_state(void)
+ 		vmx_depriv_debug_with_non_root_mode();
+ 	        if (debug_host_in_non_root_mode++ == 10)
+ 			debug_host_in_non_root_mode = 0;
+-		*to_root_mode = 0;
+ 		return false;
+ 	}
+ 
+@@ -918,7 +896,23 @@ bool vmx_repriv_cpu_state(void)
+ 	pr_info("depriv: cpu%d switching to root mode GS base %#lx kernel GS base %#lx\n",
+ 		cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ 
+-	*to_root_mode = 1;
++	cr3 = vmcs_readl(GUEST_CR3) & CR3_ADDR_MASK;
++
++#ifdef CONFIG_PAGE_TABLE_ISOLATION
++/*
++ * the following macros are from arch/x86/entry/calling.h
++ */
++#define PTI_USER_PGTABLE_BIT		PAGE_SHIFT
++#define PTI_USER_PGTABLE_MASK		(1 << PTI_USER_PGTABLE_BIT)
++#endif
++
++	if (boot_cpu_has(X86_FEATURE_PTI))
++		cr3 &= ~PTI_USER_PGTABLE_MASK;
++
++	// make sure we can call vmx_repriv_cpu_release_resources()
++	native_write_cr3(cr3);
++
++	vmx_repriv_cpu_release_resources();
+ 	return true;
+ }
+ 
+@@ -970,7 +964,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			cpu, counter, reason, cpumask_pr_args(&depriv_cpu_root_mode_mask));
+ 
+ 	switch (reason) {
+-	case EXIT_REASON_CPUID: {
++	case EXIT_REASON_CPUID:
+ 		if (!(counter % log_mod))
+ 			pr_info("depriv: cpu%d (%ld) cpuid[%#x]\n",
+ 				cpu, counter, (u32)regs[VCPU_REGS_RAX]);
+@@ -993,27 +987,19 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 		pr_debug("depriv: cpu%d (%ld) executed cpuid\n", cpu, counter);
+ 		DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+-	}
+-
+-	case EXIT_REASON_VMCALL: {
+-		unsigned long *to_root_mode;
++		break;
+ 
++	case EXIT_REASON_VMCALL:
+ 		pr_info("depriv: cpu%d (%ld) exit reason: %d cpu mask: %*pb[l]\n",
+ 			cpu, counter, reason, cpumask_pr_args(&depriv_cpu_root_mode_mask));
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
+-		to_root_mode = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_SWITCH_TO_ROOT_MODE);
+-		if (*to_root_mode) {
+-			pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, switch to root mode\n",
+-				cpu, counter, rip);
+-			vmcs_writel(GUEST_RIP, rip + insn_len);
+-			DEPRIV_SWITCH_TO_ROOT_MODE;
+-		} else {
+-			pr_debug("depriv: cpu%d (%ld) vmcall @ %#lx\n", cpu, counter, rip);
+-			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+-		}
+-	}
++		pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, switch to root mode\n",
++			cpu, counter, rip);
++		vmcs_writel(GUEST_RIP, rip + insn_len);
++		DEPRIV_SWITCH_TO_ROOT_MODE;
++		break;
+ 
+ 	default:
+ 		if (call_extra_exit_handlers && !vmx_depriv_handle(reason, regs, counter)) {
+@@ -1027,6 +1013,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx insn: %s\n",
+ 			cpu, counter, reason, rip, rsp, insn);
+ 		DEPRIV_SWITCH_TO_ROOT_MODE;
++		break;
+ 	}
+ }
+ 
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index 6c9c8c341861..c594b7a4b07c 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -64,7 +64,7 @@ SYM_CODE_START(vmx_depriv_switch_to_root_mode)
+ 	/*
+ 	 * switch to iret trampoline stack, which is mapped even in user space CR3
+ 	 */
+-	mov 2*8(%rsp), %rsp
++	mov 1*8(%rsp), %rsp
+ 
+ 	PUSH_AND_CLEAR_ALL
+ 
+-- 
+2.34.1
+

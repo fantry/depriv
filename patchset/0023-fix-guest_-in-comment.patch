@@ -1,0 +1,28 @@
+From f2425cb7faf5e453b6e3606cee138b406fa913a0 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 13 Jun 2020 20:49:49 -0700
+Subject: [PATCH 023/140] fix guest_ in comment
+
+---
+ arch/x86/kvm/vmx/depriv.c | 5 +++--
+ 1 file changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 246542d511e5..262902235702 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1310,8 +1310,9 @@ static void vmx_repriv_cpu_state(void)
+ } while (0)
+ 
+ /*
+- * if guest_rip is a user level virtual address then it's mostly not valid in
+- * root mode, because it is mapped using non-root mode cr3 and page tables.
++ * if non-root mode rip is a user level virtual address then it's mostly not
++ * valid in root mode, because it is mapped using non-root mode cr3 and page
++ * tables.
+  */
+ static void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ {
+-- 
+2.34.1
+

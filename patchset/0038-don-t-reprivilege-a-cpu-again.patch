@@ -1,0 +1,41 @@
+From 4127e10c264598894886b81cbe230ffcd6f1d995 Mon Sep 17 00:00:00 2001
+From: lxin <lxin@localhost.localdomain>
+Date: Tue, 16 Jun 2020 00:42:41 -0700
+Subject: [PATCH 038/140] don't reprivilege a cpu again
+
+---
+ arch/x86/kvm/vmx/depriv.c | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 53141cbd857c..6055f30dab7f 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1323,14 +1323,18 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ static void vmx_repriv_cpu(void *info)
+ {
+ 	int cpu = smp_processor_id();
+-	bool *to_root_mode = (bool *)(per_cpu(depriv_cpu_state, cpu) +
+-				      DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
+-				      DEPRIV_HOST_STACK_RESERVED_BYTES +
+-				      DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
++	bool *to_root_mode;
+ 
+-	*to_root_mode = true;
++	if (!per_cpu(depriv_vmcs, cpu)) {
++		pr_info("depriv: cpu%d already reprivileged\n", cpu);
++		return;
++	}
+ 
+-	// if already in root mode, then VMfail (VMCALL executed in VMX root operation)
++	to_root_mode = (bool *)(per_cpu(depriv_cpu_state, cpu) +
++				DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
++				DEPRIV_HOST_STACK_RESERVED_BYTES +
++				DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
++	*to_root_mode = true;
+ 	vmx_depriv_vmcall();
+ 
+ 	// continue in root mode...
+-- 
+2.34.1
+

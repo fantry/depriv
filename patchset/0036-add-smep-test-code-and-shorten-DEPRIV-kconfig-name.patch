@@ -1,0 +1,150 @@
+From b37fb3053fca06c0f4b97de2ec0c0f51003aae12 Mon Sep 17 00:00:00 2001
+From: lxin <lxin@localhost.localdomain>
+Date: Mon, 15 Jun 2020 23:39:20 -0700
+Subject: [PATCH 036/140] add smep test code and shorten DEPRIV kconfig name
+
+---
+ arch/x86/kvm/Kconfig       |  4 ++--
+ arch/x86/kvm/Makefile      |  2 +-
+ arch/x86/kvm/vmx/vmx.c     |  6 +++---
+ drivers/misc/Makefile      |  1 +
+ drivers/misc/smep_flipor.c | 36 ++++++++++++++++++++++++++++++++++++
+ virt/kvm/kvm_main.c        |  4 ++--
+ 6 files changed, 45 insertions(+), 8 deletions(-)
+ create mode 100644 drivers/misc/smep_flipor.c
+
+diff --git a/arch/x86/kvm/Kconfig b/arch/x86/kvm/Kconfig
+index 0c298e50befe..ad64613c4a30 100644
+--- a/arch/x86/kvm/Kconfig
++++ b/arch/x86/kvm/Kconfig
+@@ -86,8 +86,8 @@ config KVM_INTEL
+ 	  To compile this as a module, choose M here: the module
+ 	  will be called kvm-intel.
+ 
+-config KVM_INTEL_DEPRIV_HOST
+-	tristate "KVM host deprivilege for Intel (and compatible) processors support"
++config KVM_INTEL_DEPRIV
++	tristate "KVM host deprivilege for Intel"
+ 	depends on X86_64 && KVM_INTEL
+ 	help
+ 	  Run kernel in VMX non-root mode.
+diff --git a/arch/x86/kvm/Makefile b/arch/x86/kvm/Makefile
+index 85678e841df0..2bc8bd00121c 100644
+--- a/arch/x86/kvm/Makefile
++++ b/arch/x86/kvm/Makefile
+@@ -24,7 +24,7 @@ kvm-$(CONFIG_KVM_XEN)	+= xen.o
+ kvm-intel-y		+= vmx/vmx.o vmx/vmenter.o vmx/pmu_intel.o vmx/vmcs12.o \
+ 			   vmx/evmcs.o vmx/nested.o vmx/posted_intr.o
+ kvm-intel-$(CONFIG_X86_SGX_KVM)	+= vmx/sgx.o
+-kvm-intel-$(CONFIG_KVM_INTEL_DEPRIV_HOST)	+= vmx/depriv.o vmx/depriv_entry.o
++kvm-intel-$(CONFIG_KVM_INTEL_DEPRIV)	+= vmx/depriv.o vmx/depriv_entry.o
+ 
+ kvm-amd-y		+= svm/svm.o svm/vmenter.o svm/pmu.o svm/nested.o svm/avic.o svm/sev.o
+ 
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 419fe96280c4..22e92d6da219 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -54,7 +54,7 @@
+ 
+ #include "capabilities.h"
+ #include "cpuid.h"
+-#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV_HOST)
++#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV)
+ #include "depriv.h"
+ #endif
+ #include "evmcs.h"
+@@ -8051,7 +8051,7 @@ static void vmx_exit(void)
+ 	synchronize_rcu();
+ #endif
+ 
+-#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV_HOST)
++#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV)
+ 	/*
+ 	 * reprivilege host before kvm_exit disables VMX
+ 	 */
+@@ -8165,7 +8165,7 @@ static int __init vmx_init(void)
+ 	if (!enable_ept)
+ 		allow_smaller_maxphyaddr = true;
+ 
+-#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV_HOST)
++#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV)
+ 	vmx_depriv_host();
+ #endif
+ 
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index a086197af544..8d6f58982ee2 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -59,3 +59,4 @@ obj-$(CONFIG_UACCE)		+= uacce/
+ obj-$(CONFIG_XILINX_SDFEC)	+= xilinx_sdfec.o
+ obj-$(CONFIG_HISI_HIKEY_USB)	+= hisi_hikey_usb.o
+ obj-$(CONFIG_HI6421V600_IRQ)	+= hi6421v600-irq.o
++obj-$(CONFIG_KVM_INTEL_DEPRIV)	+= smep_flipor.o
+diff --git a/drivers/misc/smep_flipor.c b/drivers/misc/smep_flipor.c
+new file mode 100644
+index 000000000000..b2f7cfbfedb1
+--- /dev/null
++++ b/drivers/misc/smep_flipor.c
+@@ -0,0 +1,36 @@
++#include <uapi/asm/processor-flags.h>
++#include <linux/module.h>
++#include <linux/kernel.h>
++#include <linux/init.h>
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Xin Li");
++
++static int __init smep_init(void)
++{
++	unsigned long val;
++
++	asm volatile("mov %%cr4,%0\n\t" : "=r" (val), "=m" (__force_order));
++	val &= ~X86_CR4_SMEP;
++	asm volatile("mov %0,%%cr4"
++		     : "+r" (val));
++
++	printk(KERN_INFO "smep driver loaded\n");
++	return 0;
++}
++
++static void __exit smep_exit(void)
++{
++	unsigned long val;
++
++	asm volatile("mov %%cr4,%0\n\t"
++		     : "=r" (val), "=m" (__force_order));
++	val |= X86_CR4_SMEP;
++	asm volatile("mov %0,%%cr4"
++		     : "+r" (val));
++
++	printk(KERN_INFO "smep driver unloaded\n");
++}
++
++module_init(smep_init);
++module_exit(smep_exit);
+diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
+index 0624eeb5eb6b..9038f2768097 100644
+--- a/virt/kvm/kvm_main.c
++++ b/virt/kvm/kvm_main.c
+@@ -5751,7 +5751,7 @@ int kvm_init(void *opaque, unsigned vcpu_size, unsigned vcpu_align,
+ 	r = kvm_vfio_ops_init();
+ 	WARN_ON(r);
+ 
+-#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV_HOST) // XXX: hacky
++#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV) // XXX: hacky
+ 	hardware_enable_all();
+ #endif
+ 
+@@ -5783,7 +5783,7 @@ EXPORT_SYMBOL_GPL(kvm_init);
+ void kvm_exit(void)
+ {
+ 	int cpu;
+-#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV_HOST) // XXX: hacky
++#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV) // XXX: hacky
+ 	raw_spin_lock(&kvm_count_lock);
+ 	kvm_usage_count--;
+ 	raw_spin_unlock(&kvm_count_lock);
+-- 
+2.34.1
+

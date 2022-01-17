@@ -1,0 +1,33 @@
+From f0729ed84efecbf2d1c97db5ffc7bcab9e42721e Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 10 Jun 2020 15:13:14 -0700
+Subject: [PATCH 007/140] disable read from CR3 vm exit
+
+---
+ arch/x86/kvm/vmx/vmx.c | 6 ++----
+ 1 file changed, 2 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index d69924db9007..35271a42c445 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -9063,14 +9063,12 @@ static int __init setup_depriv_vmcs_config(void)
+ 		// if EPT is available, it's OK to disable this control
+ 		_cpu_based_exec_control &= ~CPU_BASED_CR3_LOAD_EXITING;
+ 		pr_info("depriv: disabled cr3 load exiting\n");
+-		//pr_info("depriv: keep cr3 load exiting\n");
+ 	}
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_STORE_EXITING) {
+ 		// if EPT is available, it's OK to disable this control
+-		//_cpu_based_exec_control &= ~CPU_BASED_CR3_STORE_EXITING;
+-		//pr_info("depriv: disabled cr3 restore exiting\n");
+-		pr_info("depriv: keep cr3 restore exiting\n");
++		_cpu_based_exec_control &= ~CPU_BASED_CR3_STORE_EXITING;
++		pr_info("depriv: disabled cr3 restore exiting\n");
+ 	}
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_INVLPG_EXITING) {
+-- 
+2.34.1
+

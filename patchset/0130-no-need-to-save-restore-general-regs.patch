@@ -1,0 +1,71 @@
+From 7e16e6e554138dcef5dea153625e42eb739ea863 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 25 Oct 2020 00:03:54 -0700
+Subject: [PATCH 130/140] no need to save/restore general regs
+
+---
+ arch/x86/depriv/x86.c | 40 ----------------------------------------
+ 1 file changed, 40 deletions(-)
+
+diff --git a/arch/x86/depriv/x86.c b/arch/x86/depriv/x86.c
+index f67b6e08c5e0..2ba0dbafd46a 100644
+--- a/arch/x86/depriv/x86.c
++++ b/arch/x86/depriv/x86.c
+@@ -29,54 +29,14 @@ EXPORT_SYMBOL_GPL(depriv_ops);
+ void depriv_switch(struct task_struct *prev, struct task_struct *next)
+ {
+ 	int cpu = smp_processor_id();
+-	unsigned long regs[16], rsp;
+-
+-	asm volatile("mov %%rsp,%0" : "=m" (regs[__VCPU_REGS_RSP]));
+-
+-	if (!next) {
+-		pr_err("depriv: next is NULL\n");
+-		return;
+-	}
+ 
+ 	if (!per_cpu(depriv_cpu_state, cpu))
+ 		return;
+ 
+-	asm volatile("mov %%rcx,%0" : "=m" (regs[__VCPU_REGS_RCX]));
+-	asm volatile("mov %%rdx,%0" : "=m" (regs[__VCPU_REGS_RDX]));
+-	asm volatile("mov %%rbx,%0" : "=m" (regs[__VCPU_REGS_RBX]));
+-
+-	asm volatile("mov %%r8,%0" : "=m" (regs[__VCPU_REGS_R8]));
+-	asm volatile("mov %%r9,%0" : "=m" (regs[__VCPU_REGS_R9]));
+-	asm volatile("mov %%r10,%0" : "=m" (regs[__VCPU_REGS_R10]));
+-	asm volatile("mov %%r11,%0" : "=m" (regs[__VCPU_REGS_R11]));
+-	asm volatile("mov %%r12,%0" : "=m" (regs[__VCPU_REGS_R12]));
+-	asm volatile("mov %%r13,%0" : "=m" (regs[__VCPU_REGS_R13]));
+-	asm volatile("mov %%r14,%0" : "=m" (regs[__VCPU_REGS_R14]));
+-	asm volatile("mov %%r15,%0" : "=m" (regs[__VCPU_REGS_R15]));
+-
+ 	if (depriv_ops.exit)
+ 		depriv_ops.exit();
+ 	if (depriv_ops.enter)
+ 		depriv_ops.enter(next);
+-
+-	asm volatile("mov %0,%%r15" : : "m" (regs[__VCPU_REGS_R15]));
+-	asm volatile("mov %0,%%r14" : : "m" (regs[__VCPU_REGS_R14]));
+-	asm volatile("mov %0,%%r13" : : "m" (regs[__VCPU_REGS_R13]));
+-	asm volatile("mov %0,%%r12" : : "m" (regs[__VCPU_REGS_R12]));
+-	asm volatile("mov %0,%%r11" : : "m" (regs[__VCPU_REGS_R11]));
+-	asm volatile("mov %0,%%r10" : : "m" (regs[__VCPU_REGS_R10]));
+-	asm volatile("mov %0,%%r9" : : "m" (regs[__VCPU_REGS_R9]));
+-	asm volatile("mov %0,%%r8" : : "m" (regs[__VCPU_REGS_R8]));
+-
+-	asm volatile("mov %0,%%rbx" : : "m" (regs[__VCPU_REGS_RBX]));
+-	asm volatile("mov %0,%%rdx" : : "m" (regs[__VCPU_REGS_RDX]));
+-	asm volatile("mov %0,%%rcx" : : "m" (regs[__VCPU_REGS_RCX]));
+-
+-	asm volatile("mov %%rsp,%0" : "=m" (rsp));
+-
+-	if (rsp != regs[__VCPU_REGS_RSP])
+-		pr_info("depriv: cpu%d rsp changed from %#lx to %#lx\n",
+-			cpu, regs[__VCPU_REGS_RSP], rsp);
+ }
+ 
+ void on_destroy_pid_ns(struct pid_namespace *ns)
+-- 
+2.34.1
+

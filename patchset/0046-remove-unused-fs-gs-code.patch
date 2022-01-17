@@ -1,0 +1,90 @@
+From 72ae6e33c75b77f0c07e4790b64dd0c7ad81f150 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 19:35:00 -0700
+Subject: [PATCH 046/140] remove unused fs gs code
+
+---
+ arch/x86/kvm/vmx/depriv.c | 60 ---------------------------------------
+ 1 file changed, 60 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index db70a6f76869..14919c366a8e 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1415,63 +1415,6 @@ static void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ 	insn[3 * i] = '\0';
+ }
+ 
+-static void vmx_depriv_cpu_sync_fsgs_base(unsigned long host_rsp, u32 reason)
+-{
+-	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
+-	int cpu = smp_processor_id();
+-	struct vmx_msrs *msrs = (struct vmx_msrs *)per_cpu(depriv_cpu_state, cpu);
+-	unsigned long base;
+-
+-	if (msrs->nr < 1)
+-		return;
+-
+-	base = vmcs_readl(GUEST_FS_BASE);
+-	if (msrs->val[0].value != base) {
+-		pr_info("depriv: cpu%d (%ld) exit reason %d stored FS base %#llx <= %#lx\n",
+-			cpu, *cnt, reason, msrs->val[0].value, base);
+-		vmcs_writel(GUEST_FS_BASE, msrs->val[0].value);
+-	}
+-
+-	if (msrs->nr < 2)
+-		return;
+-
+-	base = vmcs_readl(GUEST_GS_BASE);
+-	if (msrs->val[1].value != base) {
+-		pr_info("depriv: cpu%d (%ld) exit reason %d stored GS base %#llx <= %#lx\n",
+-			cpu, *cnt, reason, msrs->val[1].value, base);
+-		vmcs_writel(GUEST_GS_BASE, msrs->val[1].value);
+-	}
+-}
+-
+-static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+-{
+-	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
+-	int cpu = smp_processor_id();
+-	unsigned long base, last_base;
+-
+-	base = vmcs_readl(GUEST_FS_BASE);
+-	last_base = *(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_FS_BASE_OFFSET);
+-
+-	/*
+-	 * it's NOT unexpected that they don't match, however if we intercept
+-	 * MSR_FS_BASE writes, they should.
+-	 */
+-	if (base != last_base)
+-		pr_debug("depriv: cpu%d (%ld) exit reason %d FS base %#lx <= %#lx\n",
+-			 cpu, *cnt, reason, base, last_base);
+-
+-	base = vmcs_readl(GUEST_GS_BASE);
+-	last_base = *(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_GS_BASE_OFFSET);
+-
+-	/*
+-	 * it's NOT unexpected that they don't match, however if we intercept
+-	 * MSR_GS_BASE writes, they should.
+-	 */
+-	if (base != last_base)
+-		pr_debug("depriv: cpu%d (%ld) exit reason %d GS base %#lx <= %#lx\n",
+-			 cpu, *cnt, reason, base, last_base);
+-}
+-
+ static void handle_cr3_access(unsigned long host_rsp, unsigned long *regs, unsigned long qualification)
+ {
+ 	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
+@@ -1578,9 +1521,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ 	(*cnt)++;
+ 
+-	dump_fsgs_base(host_rsp, reason);
+-	vmx_depriv_cpu_sync_fsgs_base(host_rsp, reason);
+-
+ 	switch (reason) {
+ 	case EXIT_REASON_EXCEPTION_NMI: {
+ 		bool continue_in_root_mode = true;
+-- 
+2.34.1
+

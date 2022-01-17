@@ -1,0 +1,44 @@
+From 24f0199a5657c58c3a2c91fc596974d3f08cbd06 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 15 Oct 2020 16:06:55 -0700
+Subject: [PATCH 127/140] fix build issue with smep flipor
+
+---
+ drivers/misc/smep_flipor.c | 11 ++++-------
+ 1 file changed, 4 insertions(+), 7 deletions(-)
+
+diff --git a/drivers/misc/smep_flipor.c b/drivers/misc/smep_flipor.c
+index 249862fcf25f..ec5e41b00817 100644
+--- a/drivers/misc/smep_flipor.c
++++ b/drivers/misc/smep_flipor.c
+@@ -14,8 +14,7 @@ static void smep(bool enable)
+ 	unsigned long val;
+ 	unsigned long *pv = &val;
+ 
+-	asm volatile("mov %%cr4,%0\n\t"
+-		     : "=r" (val), "=m" (__force_order));
++	asm volatile("mov %%cr4,%0" : "=r" (val) : __FORCE_ORDER);
+ 	printk(KERN_INFO "smep: cpu%d cr4: %#lx\n", cpu, val);
+ 
+ 	if (enable)
+@@ -26,14 +25,12 @@ static void smep(bool enable)
+ 	}
+ 	printk(KERN_INFO "smep: cpu%d cr4 being set to %#lx\n", cpu, val);
+ 
+-	asm volatile("mov %0,%%cr4"
+-		     : "+r" (val));
++	asm volatile("mov %0,%%cr4" : : "r" (val) : "memory");
+ 
+-	asm volatile("mov %%cr4,%0\n\t"
+-		     : "=r" (val), "=m" (__force_order));
++	asm volatile("mov %%cr4,%0" : "=r" (val) : __FORCE_ORDER);
+ 	printk(KERN_INFO "smep: cpu%d cr4 set to %#lx\n", cpu, val);
+ 
+-	asm volatile("mov %%rsp,%0" : "=m"(val));
++	asm volatile("mov %%rsp,%0" : "=m" (val));
+ 	for (cpu = 0; cpu < 8; cpu++)
+ 		printk(KERN_INFO "smep: stack[%d]=%#lx\n", cpu, pv[cpu]);
+ }
+-- 
+2.34.1
+

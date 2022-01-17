@@ -1,0 +1,54 @@
+From 6f9d087c0d6543c75797fe34caa62a5d6b654b9a Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 22:13:02 -0700
+Subject: [PATCH 049/140] remove startup debug code after entering non root
+ mode
+
+---
+ arch/x86/kvm/vmx/depriv.c | 22 +---------------------
+ 1 file changed, 1 insertion(+), 21 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index c72b83f4752c..bbc32463f767 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1085,28 +1085,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 	vmx_depriv_result = vmx_depriv(host_rsp);
+ 	if (!vmx_depriv_result) {
+ 		// continue in non-root mode...
+-		int *to_root_mode = (int *)(host_rsp + DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
+-		unsigned long fs_base;
+-
+-		asm volatile("mov %%rsp,%0" : "=m"(rsp));
+-		asm volatile("xor %%rax,%%rax\n\t"
+-			     "pushf\n\t"
+-			     "pop %%rax\n\t"
+-			     "mov %%rax,%0"
+-			     : "=m"(rflags) :: "%rax");
+-		pr_info("depriv: cpu%d deprivileged: rsp=%#lx  rflags=%#lx\n",
+-			cpu, rsp, rflags);
+-
+ 		atomic_inc(&depriv_cpu_count);
+-
+-		*to_root_mode = 0;
+-		fs_base = read_msr(MSR_FS_BASE);
+-
+-		loadsegment(fs, __KERNEL_DS);
+-		vmx_depriv_vmcall();
+-		loadsegment(fs, 0);
+-		wrmsrl(MSR_FS_BASE, fs_base);
+-		vmx_depriv_vmcall();
+ 		return;
+ 	}
+ 
+@@ -1280,6 +1259,7 @@ static void vmx_repriv_cpu(void *info)
+ 
+ 	if (*to_root_mode == 1) {
+ 		vmx_depriv_vmcall();
++
+ 		// continue in root mode...
+ 		pr_info("depriv: cpu%d reprivileged\n", cpu);
+ 	} else
+-- 
+2.34.1
+

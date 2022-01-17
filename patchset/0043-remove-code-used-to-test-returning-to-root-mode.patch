@@ -1,0 +1,24 @@
+From 7d36beb75606721ddeeb5dbe60d2fdd64d5fa007 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 17:07:36 -0700
+Subject: [PATCH 043/140] remove code used to test returning to root mode
+
+---
+ arch/x86/kvm/vmx/depriv.c | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 5a02860a0c57..db70a6f76869 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1649,7 +1649,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			handle_cr3_access(host_rsp, regs, qualification);
+ 			break;
+ 		case 4:
+-			DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 			handle_cr4_access(host_rsp, regs, qualification);
+ 			break;
+ 		default:
+-- 
+2.34.1
+

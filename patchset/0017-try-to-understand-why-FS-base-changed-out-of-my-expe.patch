@@ -1,0 +1,211 @@
+From 3fcf89304d2066b79020a255825b0984dc9a9bbb Mon Sep 17 00:00:00 2001
+From: lxin <lxin@localhost.localdomain>
+Date: Sat, 13 Jun 2020 10:18:39 -0700
+Subject: [PATCH 017/140] try to understand why FS base changed out of my
+ expectation
+
+---
+ arch/x86/kvm/vmx/vmx.c | 92 ++++++++++++++++++++++++++----------------
+ 1 file changed, 57 insertions(+), 35 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index d1d6de866cab..a9407b4cd8b5 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8393,23 +8393,35 @@ int vmx_depriv(void);
+ void vmx_depriv_guest_rip(void);
+ void vmx_depriv_test_vmcall(void);
+ 
+-static void __init vmx_depriv_cpu_intercept_msr(u32 msr, void *msr_bitmap)
++static void vmx_depriv_cpu_intercept_msr(u32 msr, bool enable)
+ {
++	u32 orig_msr = msr;
+ 	int cpu = smp_processor_id();
++	void *msr_bitmap = per_cpu(depriv_cpu_state, cpu) +
++			   DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
+ 	int f = sizeof(unsigned long);
+ 	bool set_result = false;
+-	u32 orig_msr = msr;
+ 
+ 	if (msr <= 0x1fff) {
+-		__set_bit(msr, msr_bitmap + 0x800 / f);
++		if (enable)
++			__set_bit(msr, msr_bitmap + 0x800 / f);
++		else
++			__clear_bit(msr, msr_bitmap + 0x800 / f);
+ 		set_result = !!test_bit(msr, msr_bitmap + 0x800 / f);
+ 	} else if (msr >= 0xc0000000 && msr <= 0xc0001fff) {
+ 		msr &= 0x1fff;
+-		__set_bit(msr, msr_bitmap + 0xc00 / f);
++		if (enable)
++			__set_bit(msr, msr_bitmap + 0xc00 / f);
++		else
++			__clear_bit(msr, msr_bitmap + 0xc00 / f);
+ 		set_result = !!test_bit(msr, msr_bitmap + 0xc00 / f);
++	} else {
++		pr_err("depriv: cpu%d set MSR bitmap @ %#x out of scope\n",
++		       cpu, orig_msr);
++		return;
+ 	}
+ 
+-	if (!set_result)
++	if (set_result != enable)
+ 		pr_err("depriv: cpu%d set MSR bitmap @ %#x failed\n",
+ 		       cpu, orig_msr);
+ }
+@@ -8425,12 +8437,10 @@ static void __init vmx_depriv_cpu(void *info)
+ 	unsigned long host_rsp, guest_rsp, guest_rflags;
+ 	int vmx_depriv_result;
+ 
+-#if 0
+ 	if (!(depriv_vmcs_conf.cpu_based_exec_ctrl & CPU_BASED_USE_MSR_BITMAPS)) {
+ 		pr_err("depriv: MSR bitmap not available on cpu%d\n", cpu);
+ 		goto error;
+ 	}
+-#endif
+ 
+ 	vmcs = alloc_vmcs_cpu(false, cpu, GFP_KERNEL);
+ 	if (!vmcs) {
+@@ -8457,9 +8467,10 @@ static void __init vmx_depriv_cpu(void *info)
+ 
+ 	// last page of host state
+ 	msr_bitmap = host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
+-	vmx_depriv_cpu_intercept_msr(MSR_FS_BASE, msr_bitmap);
+-	vmx_depriv_cpu_intercept_msr(MSR_GS_BASE, msr_bitmap);
+-	vmx_depriv_cpu_intercept_msr(MSR_KERNEL_GS_BASE, msr_bitmap);
++	memset(msr_bitmap, 0xff, PAGE_SIZE);
++	vmx_depriv_cpu_intercept_msr(MSR_FS_BASE, true);
++	vmx_depriv_cpu_intercept_msr(MSR_GS_BASE, true);
++	vmx_depriv_cpu_intercept_msr(MSR_KERNEL_GS_BASE, true);
+ 	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+ 
+ 	vmx_depriv_cpu_state();
+@@ -8732,7 +8743,7 @@ static void vmx_repriv_cpu_state(void)
+ } while (0)
+ 
+ #define DEPRIV_CONTINUE_IN_NON_ROOT_MODE(ins_len) do {				\
+-	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(0);				\
++	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ins_len);				\
+ 	vmcs_writel(GUEST_RIP, guest_rip + ins_len);				\
+ 	return true;								\
+ } while (0)
+@@ -8896,10 +8907,10 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 
+ 			DEPRIV_DUMP_GPRS;
+ 			enable_log = true;
+-			dump_vmcs();
++			//dump_vmcs();
+ 			vmx_check_guest_state();
+ 
+-			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
++			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(0);
+ 		}
+ 	}
+ 
+@@ -8963,7 +8974,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		if ((u32)guest_regs[__VCPU_REGS_RAX] == 0x2) {
+ 			cnt_cpuid_0x2++;
+ 			if (cnt_cpuid_0x2 == 20) {
+-				vmcs_write32(EXCEPTION_BITMAP, 0xffffffff);
++				//vmcs_write32(EXCEPTION_BITMAP, 0xffffffff);
+ 				pr_info("depriv: cpu%d all fault VM-exit enabeld\n", cpu);
+ 			}
+ 		}
+@@ -8997,20 +9008,24 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 
+ 	case EXIT_REASON_MSR_READ: {
+ 		u32 ecx = (u32)guest_regs[__VCPU_REGS_RCX];
+-		unsigned long long val;
++		unsigned long val;
+ 		static int cnt_0x3b = 0;
+ 
+-		/*
+-		 * never read GS base from MSR, which now points to kernel mode per-CPU data
+-		 * and this VM exit handler always runs in kernel mode.
+-		 */
+-		if (ecx == MSR_GS_BASE)
++		if (ecx == MSR_FS_BASE) {
++			val = vmcs_readl(GUEST_FS_BASE);
++			pr_info("depriv: cpu%d FS base MSR: %#lx\n", cpu, val);
++		} else if (ecx == MSR_GS_BASE) {
++			/*
++			 * never read GS base MSR directly when running in root mode,
++			 * which now points to kernel mode per-CPU data.
++			 */
+ 			val = vmcs_readl(GUEST_GS_BASE);
+-		else if (rdmsrl_safe(ecx, &val))
+-			pr_info("depriv: cpu%d msr[%#x]: %#llx failed\n", cpu, ecx, val);
++			pr_info("depriv: cpu%d GS base MSR: %#lx\n", cpu, val);
++		} else if (rdmsrl_safe(ecx, (unsigned long long *)&val))
++			pr_info("depriv: cpu%d msr[%#x]: %#lx failed\n", cpu, ecx, val);
+ 
+-		pr_info("depriv: cpu%d msr[%#x]: %#llx\n", cpu, ecx, val);
+-#if 0
++		pr_info("depriv: cpu%d msr[%#x]: %#lx\n", cpu, ecx, val);
++#if 1
+ 		pr_info("depriv: cpu%d (%ld) FS base %#lx : %#lx : %#lx\n",
+ 			cpu, cnt, read_msr(MSR_FS_BASE),
+ 			vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
+@@ -9018,13 +9033,13 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		if (ecx == 0x3b) {
+ 			cnt_0x3b++;
+ 			if (cnt_0x3b == 2) {
+-				vmcs_write32(EXCEPTION_BITMAP, 0xffffffff);
++				//vmcs_write32(EXCEPTION_BITMAP, 0xffffffff);
+ 				pr_info("depriv: cpu%d all fault VM-exit enabeld\n", cpu);
+ 			}
+ 		}
+ 
+-		guest_regs[__VCPU_REGS_RAX] = (u32)val;
+-		guest_regs[__VCPU_REGS_RDX] = (u32)(val >> 32);
++		*((u32 *)&guest_regs[__VCPU_REGS_RAX]) = (u32)val;
++		*((u32 *)&guest_regs[__VCPU_REGS_RDX]) = (u32)(val >> 32);
+ 
+ 		pr_info("depriv: cpu%d executed rdmsr and continue in non-root mode\n", cpu);
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+@@ -9037,16 +9052,23 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		unsigned long val = (unsigned long)(u32)guest_regs[__VCPU_REGS_RAX] |
+ 				    ((unsigned long)(u32)guest_regs[__VCPU_REGS_RDX] << 32);
+ 
+-		/*
+-		 * never change GS BASE, which points to kernel mode per-CPU data and this
+-		 * VM exit handler always runs in kernel mode.
+-		 */
+-		if (ecx != MSR_GS_BASE && wrmsrl_safe(ecx, val))
++		if (ecx == MSR_GS_BASE) {
++			/*
++			 * never write GS base MSR directly when running in root mode,
++			 * which now points to kernel mode per-CPU data.
++			 */
++			pr_info("depriv: cpu%d GS base MSR = %#lx\n", cpu, val);
++		} else if (wrmsrl_safe(ecx, val))
+ 			continue_in_root_mode = true;
+ 
+ 		switch (ecx) {
+ 		case MSR_IA32_SPEC_CTRL:
+-			pr_debug("depriv: cpu%d speculation control msr = %#lx\n", cpu, val);
++			pr_debug("depriv: cpu%d speculation control MSR = %#lx\n", cpu, val);
++			vmx_depriv_cpu_intercept_msr(MSR_IA32_PRED_CMD, true);
++			break;
++		case MSR_IA32_PRED_CMD:
++			pr_debug("depriv: cpu%d prediction command MSR = %#lx\n", cpu, val);
++			vmx_depriv_cpu_intercept_msr(MSR_IA32_PRED_CMD, true);
+ 			break;
+ 		case MSR_FS_BASE:
+ #if 0
+@@ -9084,10 +9106,10 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			pr_info("depriv: cpu%d kernel GS base MSR = %#lx\n", cpu, val);
+ 			break;
+ 		case MSR_IA32_TSCDEADLINE:
+-			pr_debug("depriv: cpu%d TSC deadline = %#lx\n", cpu, val);
++			pr_debug("depriv: cpu%d TSC deadline timer MSR = %#lx\n", cpu, val);
+ 			break;
+ 		case 0x80b: // EOI virtualization msr
+-			pr_debug("depriv: cpu%d EOI msr = %#lx\n", cpu, val);
++			pr_debug("depriv: cpu%d EOI MSR = %#lx\n", cpu, val);
+ 			break;
+ 		default:
+ 			pr_info("depriv: cpu%d msr[%#x] = %#lx\n", cpu, ecx, val);
+-- 
+2.34.1
+

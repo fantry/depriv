@@ -1,0 +1,247 @@
+From 7dce2680c34d1211245bbf56e40e240fd2808327 Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Thu, 18 Jun 2020 00:16:07 -0700
+Subject: [PATCH 054/140] cleanup guest segments validation
+
+---
+ arch/x86/kvm/vmx/depriv.c | 176 +++++++++++++++++++-------------------
+ 1 file changed, 88 insertions(+), 88 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 01635ac7a38c..784c8b471825 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -139,108 +139,107 @@ static void vmx_check_guest_segment(u8 seg, bool vm86_active,
+ 	unsigned long base = vmcs_readl(sel + GUEST_ES_BASE - GUEST_ES_SELECTOR);
+ 	u32 limit = vmcs_read32(sel + GUEST_ES_LIMIT - GUEST_ES_SELECTOR);
+ 	u32 ar = vmcs_read32(sel + GUEST_ES_AR_BYTES - GUEST_ES_SELECTOR);
+-	bool unusable = !!(ar & VMX_AR_UNUSABLE_MASK);
+-	bool present = !!(ar & VMX_AR_P_MASK);
+ 	unsigned rpl = selector & SEGMENT_RPL_MASK;
+ 	unsigned ti = selector & SEGMENT_TI_MASK;
+ 	unsigned type = ar & VMX_AR_TYPE_MASK;
+ 	unsigned dpl = VMX_AR_DPL(ar);
+ 
+-	if (unusable) {
+-		pr_err("depriv: seg%d sel=0x%04x, attr=0x%05x, limit=0x%08x, base=0x%016lx\n",
+-		       seg, selector, ar, limit, base);
++	if (ar & VMX_AR_UNUSABLE_MASK)
+ 		return;
+-	}
+ 
+-	if (seg == VCPU_SREG_TR)
+-		check(ti == 0);
+-	else if (seg == VCPU_SREG_LDTR)
+-		check(!present || ti == 0);
+-	else if (seg == VCPU_SREG_SS)
+-		check(vm86_active ||
+-		      unrestricted ||
+-		      rpl == (vmcs_read16(GUEST_CS_SELECTOR) & SEGMENT_RPL_MASK));
++	pr_debug("depriv: seg%d sel=0x%04x, attr=0x%05x, limit=0x%08x, base=0x%016lx\n",
++		 seg, selector, ar, limit, base);
++
++	check(ar & VMX_AR_P_MASK);
+ 
+-	if (seg < VCPU_SREG_LDTR && vm86_active)
++	if (seg == VCPU_SREG_SS)
++		check(vm86_active || unrestricted ||
++		      rpl == (vmcs_read16(GUEST_CS_SELECTOR) & SEGMENT_RPL_MASK));
++	if (seg < VCPU_SREG_TR && vm86_active)
+ 		check(base == (unsigned long)(selector << 4));
+ 	if (seg == VCPU_SREG_TR || seg == VCPU_SREG_FS || seg == VCPU_SREG_GS)
+ 		CHECK_IS_GUEST_ADDR_CANONICAL(base);
+ 	else if (seg == VCPU_SREG_LDTR)
+-		check(!present || is_canonical_address(base, vmcs_readl(GUEST_CR4)));
++		check(is_canonical_address(base, vmcs_readl(GUEST_CR4)));
+ 	else if (seg == VCPU_SREG_CS)
+ 		check(!((u32)(base >> 32)));
+ 	else
+-		check(!present || !((u32)(base >> 32)));
++		check(!((u32)(base >> 32)));
+ 
+-	if (seg < VCPU_SREG_LDTR && vm86_active)
++	if (seg < VCPU_SREG_TR && vm86_active)
+ 		check(limit == 0xffff);
+ 
+-	if (seg < VCPU_SREG_LDTR)
+-		if (vm86_active)
+-			check(ar == 0xF3);
+-		else {
+-			// Type
+-			if (seg == VCPU_SREG_CS)
+-				check((unrestricted && type == 3) ||
+-				      (type & 9) == 9);
+-			else if (seg == VCPU_SREG_SS)
+-				check(!present || type == 3 || type == 7);
+-			else if (present)
+-				check((type & 1) == 1 &&
+-				      ((type & 8) == 0 || (type & 2) == 2));
+-			// S
+-			if (seg == VCPU_SREG_TR)
+-				check(!(ar & VMX_AR_S_MASK));
+-			if (seg != VCPU_SREG_TR && present) {
+-				check(ar & VMX_AR_S_MASK);
+-			}
+-			// DPL
+-			if (seg == VCPU_SREG_CS)
+-				if (type == 3) /* data segment => real mode */
+-					check(dpl == 0);
+-				else if ((type & 4) == 0) /* non-conforming code segment */
+-					check(dpl == VMX_AR_DPL(vmcs_read32(GUEST_SS_AR_BYTES)));
+-				else /* conforming code segment */
+-					check(dpl <= VMX_AR_DPL(vmcs_read32(GUEST_SS_AR_BYTES)));
+-			else if (seg == VCPU_SREG_SS)
+-				if (!(vmcs_readl(GUEST_CR0) & X86_CR0_PE) ||
+-				    (vmcs_read32(GUEST_CS_AR_BYTES) & VMX_AR_TYPE_MASK) == 3)
+-					check(dpl == 0);
+-				else
+-					check(dpl == rpl);
+-			else if (!unrestricted && present && type <= 11)
+-				/* not a conforming code segment */
+-				check(dpl >= rpl);
+-			// P
+-			if (seg == VCPU_SREG_CS || present)
+-				check(present);
+-			// reserved bits
+-			if (seg == VCPU_SREG_CS || present)
+-				check((ar & 0xfffe0f00) == 0);
+-			// D/B
+-			if (seg == VCPU_SREG_CS)
+-				check(!long_mode_active || !(ar & VMX_AR_L_MASK) || !(ar & VMX_AR_DB_MASK));
+-			// G
+-			if (seg == VCPU_SREG_CS || present) {
+-				check((limit & PAGE_M) == PAGE_M || !(ar & VMX_AR_G_MASK));
+-				check(limit >> 20 == 0 || ar & VMX_AR_G_MASK);
+-			}
+-		}
+-	else if (seg == VCPU_SREG_TR) {
+-		check((!long_mode_active && type == 3) || type == 11);
++	if (seg == VCPU_SREG_LDTR) {
++		check(ti == 0);
++		check(type == VMX_AR_TYPE_READABLE_MASK);
+ 		check(!(ar & VMX_AR_S_MASK));
+-		check(present);
+-		check((ar & 0xfffe0f00) == 0);
++		check((ar & VMX_AR_RESERVD_MASK) == 0);
+ 		check((limit & PAGE_M) == PAGE_M || !(ar & VMX_AR_G_MASK));
+ 		check(limit >> 20 == 0 || ar & VMX_AR_G_MASK);
+-	} else if (seg == VCPU_SREG_LDTR && present) {
+-		check(type == 2);
++		return;
++	}
++
++	if (seg == VCPU_SREG_TR) {
++		check(ti == 0);
++		check((!long_mode_active &&
++		       type == (VMX_AR_TYPE_ACCESSES_MASK | VMX_AR_TYPE_READABLE_MASK)) ||
++		      type == (VMX_AR_TYPE_ACCESSES_MASK | VMX_AR_TYPE_READABLE_MASK |
++			       VMX_AR_TYPE_CODE_MASK));
+ 		check(!(ar & VMX_AR_S_MASK));
+-		check(present);
+-		check((ar & 0xfffe0f00) == 0);
++		check((ar & VMX_AR_RESERVD_MASK) == 0);
+ 		check((limit & PAGE_M) == PAGE_M || !(ar & VMX_AR_G_MASK));
+ 		check(limit >> 20 == 0 || ar & VMX_AR_G_MASK);
++		return;
++	}
++
++	if (vm86_active) {
++		check(ar == (VMX_AR_TYPE_ACCESSES_MASK |
++			     VMX_AR_TYPE_READABLE_MASK |
++			     VMX_AR_S_MASK |
++			     (3 << VMX_AR_DPL_SHIFT) |
++			     VMX_AR_P_MASK));
++		return;
+ 	}
++
++	// Type
++	if (seg == VCPU_SREG_CS)
++		check((unrestricted &&
++		       type == (VMX_AR_TYPE_ACCESSES_MASK | VMX_AR_TYPE_READABLE_MASK)) ||
++		      (type & VMX_AR_TYPE_ACCESSES_MASK && type & VMX_AR_TYPE_CODE_MASK));
++	else if (seg == VCPU_SREG_SS)
++		check(type == (VMX_AR_TYPE_ACCESSES_MASK | VMX_AR_TYPE_READABLE_MASK) ||
++		      type == (VMX_AR_TYPE_ACCESSES_MASK | VMX_AR_TYPE_READABLE_MASK |
++			       VMX_AR_TYPE_WRITEABLE_MASK));
++	else
++		check(type & VMX_AR_TYPE_ACCESSES_MASK &&
++		      (!(type & VMX_AR_TYPE_CODE_MASK) || type & VMX_AR_TYPE_READABLE_MASK));
++	// S
++	check(ar & VMX_AR_S_MASK);
++	// DPL
++	if (seg == VCPU_SREG_CS)
++		if (type == (VMX_AR_TYPE_ACCESSES_MASK | VMX_AR_TYPE_READABLE_MASK))
++			check(dpl == 0 && unrestricted);
++		else if (!(type & VMX_AR_TYPE_WRITEABLE_MASK))
++			check(dpl == VMX_AR_DPL(vmcs_read32(GUEST_SS_AR_BYTES)));
++		else
++			check(dpl <= VMX_AR_DPL(vmcs_read32(GUEST_SS_AR_BYTES)));
++	else if (seg == VCPU_SREG_SS)
++		if (!(vmcs_readl(GUEST_CR0) & X86_CR0_PE) ||
++		    (vmcs_read32(GUEST_CS_AR_BYTES) & VMX_AR_TYPE_MASK) ==
++		    (VMX_AR_TYPE_ACCESSES_MASK | VMX_AR_TYPE_READABLE_MASK))
++			check(dpl == 0);
++		else
++			check(dpl == rpl);
++	else if (!unrestricted && type <= VMX_AR_TYPE_BUSY_64_TSS)
++		check(dpl >= rpl);
++	// reserved bits
++	check((ar & VMX_AR_RESERVD_MASK) == 0);
++	// D/B
++	if (seg == VCPU_SREG_CS)
++		check(!long_mode_active || !(ar & VMX_AR_L_MASK) || !(ar & VMX_AR_DB_MASK));
++	// G
++	check((limit & PAGE_M) == PAGE_M || !(ar & VMX_AR_G_MASK));
++	check(limit >> 20 == 0 || ar & VMX_AR_G_MASK);
+ }
+ 
+ static void vmx_check_guest_state(void)
+@@ -755,15 +754,15 @@ static inline u32 __init get_desc_ar(struct desc_struct *dentry,
+ 	 */
+ 	bool s = (unusable ? dentry->s :
+ 			     (is_segment ? 1 : 0));
+-	u32 ar = dentry->type |
+-		 (s ? 1 : 0) << 4 |
+-		 dentry->dpl << 5 |
+-		 dentry->p << 7 |
+-		 dentry->avl << 12 |
+-		 dentry->l << 13 |
+-		 dentry->d << 14 |
+-		 dentry->g << 15 |
+-		 unusable << 16;
++	u32 ar = (dentry->type) |
++		 (s ? VMX_AR_S_MASK : 0) |
++		 (dentry->dpl << VMX_AR_DPL_SHIFT) |
++		 (dentry->p ? VMX_AR_P_MASK : 0) |
++		 (dentry->avl << 12) |
++		 (dentry->l ? VMX_AR_L_MASK : 0) |
++		 (dentry->d ? VMX_AR_DB_MASK : 0) |
++		 (dentry->g ? VMX_AR_G_MASK : 0) |
++		 (unusable ? VMX_AR_UNUSABLE_MASK : 0);
+ 	pr_debug("depriv: cpu%d entry ar %#x\n", cpu, ar);
+ 	return ar;
+ }
+@@ -848,7 +847,7 @@ static void __init vmx_depriv_cpu_tr(unsigned long gdt_base)
+ 
+ 	ar = vmcs_read32(GUEST_TR_AR_BYTES);
+ 	if ((ar & VMX_AR_TYPE_MASK) != VMX_AR_TYPE_BUSY_64_TSS) {
+-		pr_err("%s: tss fixup for long mode\n", __func__);
++		pr_err("depriv: cpu%d tr ar %#x, fix it up\n", cpu, ar);
+ 		vmcs_write32(GUEST_TR_AR_BYTES,
+ 			     (ar & ~VMX_AR_TYPE_MASK) |
+ 			     VMX_AR_TYPE_BUSY_64_TSS);
+@@ -1067,9 +1066,10 @@ static void __init vmx_depriv_cpu(void *info)
+ 	if (test_handle_invalid_guest_state)
+ 		vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
+ 
++	vmx_check_guest_state();
++
+ 	/*
+ 	 * Should we save/restore general purpose registers around vmx_depriv?
+-	 * Yes, but only restore them when there was a successful vmentry.
+ 	 */
+ 	vmx_depriv_result = vmx_depriv(host_rsp);
+ 	if (!vmx_depriv_result) {
+-- 
+2.34.1
+

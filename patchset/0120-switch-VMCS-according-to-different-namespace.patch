@@ -1,0 +1,494 @@
+From c34f2f9e45eeb21c40d0c8bb1c252ac3c75a3197 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 29 Sep 2020 13:32:18 -0700
+Subject: [PATCH 120/140] switch VMCS according to different namespace
+
+---
+ arch/x86/depriv/vmx/depriv.c  | 188 ++++++++++++++++++++++++----------
+ arch/x86/depriv/vmx/vmx.c     |  58 ++++++-----
+ arch/x86/depriv/vmx/vmx.h     |  12 +--
+ arch/x86/depriv/x86.c         |   9 +-
+ arch/x86/include/asm/depriv.h |   6 ++
+ include/linux/depriv.h        |   7 +-
+ kernel/pid_namespace.c        |   3 +
+ 7 files changed, 186 insertions(+), 97 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index bec72a84ba66..8c668bb3b2b0 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -8,6 +8,7 @@
+ 
+ #include <linux/delay.h>
+ #include <linux/module.h>
++#include <linux/pid_namespace.h>
+ #include <linux/slab.h>
+ 
+ #include <asm/tlbflush.h>
+@@ -18,6 +19,17 @@
+ MODULE_AUTHOR("Xin Li");
+ MODULE_LICENSE("GPL");
+ 
++/*
++ * Track a VMCS that may be loaded on a certain CPU. If it is (cpu!=-1), also
++ * remember whether it was VMLAUNCHed, and maintain a linked list of all VMCSs
++ * loaded on this CPU (so we can clear them if the CPU goes down).
++ */
++struct depriv_loaded_vmcs {
++	struct vmcs *vmcs;
++	struct pid_namespace *ns;
++	struct list_head loaded_vmcss_on_cpu_link;
++};
++
+ static bool __read_mostly test_early_invalid_state = 1;
+ module_param(test_early_invalid_state, bool, S_IRUGO);
+ 
+@@ -77,8 +89,6 @@ static inline void vmclear_local_loaded_vmcss(void)
+ 				 loaded_vmcss_on_cpu_link) {
+ 		vmcs_clear(v->vmcs);
+ 		free_vmcs(v->vmcs);
+-		v->vmcs = NULL;
+-		v->launched = false;
+ 		list_del(&v->loaded_vmcss_on_cpu_link);
+ 		kmem_cache_free(loaded_vmcs_cache, v);
+ 	}
+@@ -134,9 +144,6 @@ static bool __vmx_depriv(bool launch)
+ 	unsigned long rip, rsp;
+ 	int depriv_result;
+ 
+-	if (depriv_exiting)
+-		return false;
+-
+ 	rip = (unsigned long)vmx_depriv_rip;
+ 	vmcs_writel(GUEST_RIP, rip);
+ 
+@@ -207,14 +214,66 @@ static inline int __hardware_enable(struct vmcs *vmcs)
+ 	return 0;
+ }
+ 
++static inline bool init_vmcs(struct pid_namespace *ns)
++{
++	int cpu = raw_smp_processor_id();
++	struct vmcs *vmcs;
++	struct depriv_loaded_vmcs *loaded_vmcs;
++	void *host_cpu_state;
++	unsigned long host_rsp;
++	bool r = false;
++
++	vmcs = alloc_vmcs();
++	if (!vmcs) {
++		pr_err("depriv: cpu%d unable to allocate VMCS for namespace %p\n", cpu, ns);
++		goto exit;
++	}
++
++	loaded_vmcs = kmem_cache_zalloc(loaded_vmcs_cache, GFP_KERNEL_ACCOUNT);
++	if (!loaded_vmcs) {
++		pr_err("depriv: cpu%d unable to allocate loaded VMCS for namespace %p\n", cpu, ns);
++		free_vmcs(vmcs);
++		goto exit;
++	}
++
++	r = true;
++
++	loaded_vmcs->vmcs = vmcs;
++	loaded_vmcs->ns = ns;
++	list_add(&loaded_vmcs->loaded_vmcss_on_cpu_link, &per_cpu(loaded_vmcss, cpu));
++
++	vmcs_clear(vmcs);
++
++	vmcs_load(vmcs);
++	indirect_branch_prediction_barrier();
++	vmcs_write64(VMCS_LINK_POINTER, ~0ull);
++	per_cpu(current_vmcs, cpu) = vmcs;
++
++	host_cpu_state = per_cpu(depriv_cpu_state, cpu);
++	vmcs_writel(HOST_CR3, __pa(host_cpu_state + DEPRIV_CPU_STATE_ROOT_PGD));
++	vmcs_write64(MSR_BITMAP, __pa(host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP));
++
++	vmx_depriv_cpu_state();
++
++	// page 0 of host state: reserve extra DEPRIV_HOST_STACK_RESERVED_BYTES bytes
++	// for reprivileging host
++	host_rsp = (unsigned long)host_cpu_state
++		+ DEPRIV_CPU_STATE_VMCS_MSR_BITMAP - DEPRIV_HOST_STACK_RESERVED_BYTES;
++	vmcs_writel(HOST_RSP, host_rsp);
++
++	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_IRET_STACK) =
++		depriv_iret_trampoline_stack(cpu);
++
++exit:
++	return r;
++}
++
+ static void vmx_depriv_cpu(void *info)
+ {
+ 	int cpu = raw_smp_processor_id(), r;
+-	unsigned long cr3_pa = (unsigned long)info, host_rsp;
++	unsigned long cr3_pa = (unsigned long)info;
+ 	struct page *page = NULL;
+-	struct vmcs *vmcs = NULL;
+-	void *host_cpu_state, *host_cr3_va, *msr_bitmap;
+-	struct depriv_loaded_vmcs *loaded_vmcs = NULL;
++	void *host_cpu_state;
+ 
+ 	// memory for root mode VM exit handler
+ 	page = __alloc_pages_node(cpu_to_node(cpu), GFP_KERNEL, DEPRIV_CPU_STATE_PAGE_ORDER);
+@@ -235,50 +294,14 @@ static void vmx_depriv_cpu(void *info)
+ 	}
+ 
+ 	// page 2 of host state
+-	host_cr3_va = host_cpu_state + DEPRIV_CPU_STATE_ROOT_PGD;
+-	memcpy(host_cr3_va, __va(cr3_pa), PAGE_SIZE);
++	memcpy(host_cpu_state + DEPRIV_CPU_STATE_ROOT_PGD, __va(cr3_pa), PAGE_SIZE);
+ 
+ 	// page 1 of host state
+-	msr_bitmap = host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
+ 	if (intercept_msr)
+-		memset(msr_bitmap, 0xffffffff, PAGE_SIZE);
++		memset(host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP, 0xffffffff, PAGE_SIZE);
+ 
+-	vmcs = alloc_vmcs();
+-	if (!vmcs) {
+-		pr_err("depriv: unable to allocate VMCS for cpu%d\n", cpu);
++	if (!init_vmcs(&init_pid_ns))
+ 		goto error;
+-	}
+-
+-	loaded_vmcs = kmem_cache_zalloc(loaded_vmcs_cache, GFP_KERNEL_ACCOUNT);
+-	if (!loaded_vmcs) {
+-		pr_err("depriv: unable to allocate loaded VMCS for cpu%d\n", cpu);
+-		free_vmcs(vmcs);
+-		goto error;
+-	}
+-
+-	loaded_vmcs->vmcs = vmcs;
+-	loaded_vmcs->launched = false;
+-	list_add(&loaded_vmcs->loaded_vmcss_on_cpu_link, &per_cpu(loaded_vmcss, cpu));
+-
+-	vmcs_clear(vmcs);
+-	vmcs_load(vmcs);
+-	indirect_branch_prediction_barrier();
+-
+-	per_cpu(current_vmcs, cpu) = vmcs;
+-
+-	vmcs_write64(VMCS_LINK_POINTER, ~0ull);
+-	vmcs_writel(HOST_CR3, __pa(host_cr3_va));
+-	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+-
+-	vmx_depriv_cpu_state();
+-
+-	// page 0 of host state: reserve extra DEPRIV_HOST_STACK_RESERVED_BYTES bytes
+-	// for reprivileging host
+-	host_rsp = (unsigned long)msr_bitmap - DEPRIV_HOST_STACK_RESERVED_BYTES;
+-	vmcs_writel(HOST_RSP, host_rsp);
+-
+-	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_IRET_STACK) =
+-		depriv_iret_trampoline_stack(cpu);
+ 
+ 	if (test_early_invalid_state && test_handle_invalid_host_state)
+ 		vmcs_write32(CR3_TARGET_COUNT, DEPRIV_INVALID_HOST_CR3_TARGET_COUNT);
+@@ -432,11 +455,20 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	}
+ }
+ 
+-static bool vmx_depriv(void)
++static bool vmx_depriv(struct task_struct *next)
+ {
+ 	int cpu;
++	struct pid_namespace *ns = task_active_pid_ns(next);
++	struct vmcs *vmcs = NULL;
++	struct depriv_loaded_vmcs *v, *n;
+ 	bool r = false;
+ 
++	if (!ns)
++		goto out;
++
++	if (depriv_exiting)
++		goto out;
++
+ 	if (test_handle_invalid_host_state || test_handle_invalid_guest_state)
+ 		goto out;
+ 
+@@ -444,10 +476,33 @@ static bool vmx_depriv(void)
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+ 		goto out;
+ 
+-	// What else should we sync to non-root mode?
+-	vmcs_writel(GUEST_CR3, __read_cr3());
++	list_for_each_entry_safe(v, n, &per_cpu(loaded_vmcss, cpu),
++				 loaded_vmcss_on_cpu_link) {
++		if (v->vmcs && v->ns && v->ns == ns) {
++			vmcs = v->vmcs;
++			break;
++		}
++	}
+ 
+-	r = __vmx_depriv(false);
++	if (!vmcs) {
++		if (!init_vmcs(ns))
++			goto out;
++
++		r = __vmx_depriv(true);
++	} else {
++		if (per_cpu(current_vmcs, cpu) != vmcs) {
++			vmcs_load(vmcs);
++			indirect_branch_prediction_barrier();
++			per_cpu(current_vmcs, cpu) = vmcs;
++		}
++
++		vmx_depriv_cpu_segments();
++
++		// What else should we sync to non-root mode?
++		vmcs_writel(GUEST_CR3, __read_cr3());
++
++		r = __vmx_depriv(false);
++	}
+ out:
+ 	return r;
+ }
+@@ -466,6 +521,32 @@ static void vmx_repriv(void)
+ 	__vmx_repriv();
+ }
+ 
++static void vmx_free_loaded_vmcs(void *info)
++{
++	struct pid_namespace *ns = (struct pid_namespace *)info;
++	int cpu = raw_smp_processor_id();
++	struct depriv_loaded_vmcs *v, *n;
++
++	list_for_each_entry_safe(v, n, &per_cpu(loaded_vmcss, cpu),
++				 loaded_vmcss_on_cpu_link) {
++		if (v->ns == ns) {
++			pr_info("depriv: cpu%d freeing vmcs for namespace %p\n", cpu, ns);
++			vmcs_clear(v->vmcs);
++			free_vmcs(v->vmcs);
++			v->vmcs = NULL;
++			v->ns = NULL;
++			break;
++		}
++	}
++}
++
++static void vmx_free_pidns_cb(struct pid_namespace *ns)
++{
++	on_each_cpu(vmx_free_loaded_vmcs, (void *)ns, 1);
++}
++
++extern struct depriv_ops depriv_ops;
++
+ static int __init vmx_depriv_init(void)
+ {
+ 	int r = setup_vmcs_config();
+@@ -494,6 +575,8 @@ static int __init vmx_depriv_init(void)
+ 
+ 	depriv_ops.enter = vmx_depriv;
+ 	depriv_ops.exit = vmx_repriv;
++	depriv_ops.free_pidns_cb = vmx_free_pidns_cb;
++	depriv_ops.free_pidns_cb = NULL;
+ 
+ 	pr_info("depriv: successfully initialized\n");
+ 	return 0;
+@@ -524,6 +607,7 @@ static void __exit vmx_depriv_exit(void)
+ 
+ 	depriv_ops.enter = NULL;
+ 	depriv_ops.exit = NULL;
++	depriv_ops.free_pidns_cb = NULL;
+ 
+ 	on_each_cpu(vmx_repriv_cpu_release_resources, NULL, 1);
+ 
+diff --git a/arch/x86/depriv/vmx/vmx.c b/arch/x86/depriv/vmx/vmx.c
+index 0371eed3da27..5f9a1ac895d1 100644
+--- a/arch/x86/depriv/vmx/vmx.c
++++ b/arch/x86/depriv/vmx/vmx.c
+@@ -397,31 +397,6 @@ static inline u32 get_desc_ar(struct desc_struct *dentry,
+ 	DEPRIV_SELECTOR(SEG, seg);						\
+ }
+ 
+-static void vmx_depriv_cpu_segments(unsigned long gdt_base)
+-{
+-	int cpu = raw_smp_processor_id();
+-	struct desc_struct *dentry;
+-	unsigned long base;
+-	bool is_segment = true;
+-
+-	DEPRIV_SEGMENT(CS);
+-	DEPRIV_SEGMENT(DS);
+-	DEPRIV_SEGMENT(ES);
+-	DEPRIV_SEGMENT(SS);
+-	DEPRIV_SEGMENT(FS);
+-	DEPRIV_SEGMENT(GS);
+-
+-	base = read_msr(MSR_FS_BASE);
+-	pr_debug("depriv: cpu%d FS base MSR %#lx\n", cpu, base);
+-	vmcs_writel(HOST_FS_BASE, base);
+-	vmcs_writel(GUEST_FS_BASE, base);
+-
+-	base = read_msr(MSR_GS_BASE);
+-	pr_debug("depriv: cpu%d GS base MSR %#lx\n", cpu, base);
+-	vmcs_writel(HOST_GS_BASE, base);
+-	vmcs_writel(GUEST_GS_BASE, base);
+-}
+-
+ static void vmx_depriv_cpu_ldtr(unsigned long gdt_base)
+ {
+ 	int cpu = raw_smp_processor_id();
+@@ -463,6 +438,35 @@ static void vmx_depriv_cpu_tr(unsigned long gdt_base)
+ 	}
+ }
+ 
++void vmx_depriv_cpu_segments(void)
++{
++	int cpu = raw_smp_processor_id();
++	unsigned long gdt_base = vmcs_readl(HOST_GDTR_BASE);
++	struct desc_struct *dentry;
++	unsigned long base;
++	bool is_segment = true;
++
++	DEPRIV_SEGMENT(CS);
++	DEPRIV_SEGMENT(DS);
++	DEPRIV_SEGMENT(ES);
++	DEPRIV_SEGMENT(SS);
++	DEPRIV_SEGMENT(FS);
++	DEPRIV_SEGMENT(GS);
++
++	base = read_msr(MSR_FS_BASE);
++	pr_debug("depriv: cpu%d FS base MSR %#lx\n", cpu, base);
++	vmcs_writel(HOST_FS_BASE, base);
++	vmcs_writel(GUEST_FS_BASE, base);
++
++	base = read_msr(MSR_GS_BASE);
++	pr_debug("depriv: cpu%d GS base MSR %#lx\n", cpu, base);
++	vmcs_writel(HOST_GS_BASE, base);
++	vmcs_writel(GUEST_GS_BASE, base);
++
++	vmx_depriv_cpu_ldtr(gdt_base);
++	vmx_depriv_cpu_tr(gdt_base);
++}
++
+ static void vmx_depriv_cpu_desc_tables(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+@@ -486,9 +490,7 @@ static void vmx_depriv_cpu_desc_tables(void)
+ 	/* there is no host idt limit */
+ 	vmcs_write32(GUEST_IDTR_LIMIT, idt.size);
+ 
+-	vmx_depriv_cpu_segments(gdt_base);
+-	vmx_depriv_cpu_ldtr(gdt_base);
+-	vmx_depriv_cpu_tr(gdt_base);
++	vmx_depriv_cpu_segments();
+ }
+ 
+ static void vmx_depriv_cpu_sysenter_msrs(void)
+diff --git a/arch/x86/depriv/vmx/vmx.h b/arch/x86/depriv/vmx/vmx.h
+index e8810c7859f3..3c39db8c532c 100644
+--- a/arch/x86/depriv/vmx/vmx.h
++++ b/arch/x86/depriv/vmx/vmx.h
+@@ -317,17 +317,6 @@ static inline bool cpu_has_secondary_exec_ctrls(void)
+ 		CPU_BASED_ACTIVATE_SECONDARY_CONTROLS;
+ }
+ 
+-/*
+- * Track a VMCS that may be loaded on a certain CPU. If it is (cpu!=-1), also
+- * remember whether it was VMLAUNCHed, and maintain a linked list of all VMCSs
+- * loaded on this CPU (so we can clear them if the CPU goes down).
+- */
+-struct depriv_loaded_vmcs {
+-	struct vmcs *vmcs;
+-	bool launched;
+-	struct list_head loaded_vmcss_on_cpu_link;
+-};
+-
+ #define DEPRIV_INVALID_HOST_CR3_TARGET_COUNT	0x100000
+ 
+ int __init setup_vmcs_config(void);
+@@ -339,5 +328,6 @@ inline int __cpu_vmxon(u64 vmxon_pointer);
+ inline void __cpu_vmxoff(void);
+ 
+ void vmx_depriv_cpu_state(void);
++void vmx_depriv_cpu_segments(void);
+ 
+ #endif /* __DEPRIV_X86_VMX_H */
+diff --git a/arch/x86/depriv/x86.c b/arch/x86/depriv/x86.c
+index 9beb08f2c5b2..dd5439512550 100644
+--- a/arch/x86/depriv/x86.c
++++ b/arch/x86/depriv/x86.c
+@@ -17,6 +17,7 @@ EXPORT_PER_CPU_SYMBOL(depriv_cpu_state);
+ struct depriv_ops depriv_ops = {
+ 	.enter = NULL,
+ 	.exit = NULL,
++	.free_pidns_cb = NULL,
+ };
+ EXPORT_SYMBOL_GPL(depriv_ops);
+ 
+@@ -33,5 +34,11 @@ void depriv_switch(struct task_struct *prev, struct task_struct *next)
+ 	if (depriv_ops.exit)
+ 		depriv_ops.exit();
+ 	if (depriv_ops.enter)
+-		depriv_ops.enter();
++		depriv_ops.enter(next);
++}
++
++void depriv_free_pidns_callback(struct pid_namespace *ns)
++{
++	if (depriv_ops.free_pidns_cb)
++		depriv_ops.free_pidns_cb(ns);
+ }
+diff --git a/arch/x86/include/asm/depriv.h b/arch/x86/include/asm/depriv.h
+index 942a86a005d5..e13706497cf1 100644
+--- a/arch/x86/include/asm/depriv.h
++++ b/arch/x86/include/asm/depriv.h
+@@ -7,6 +7,12 @@
+ #include <asm/percpu.h>
+ #include <asm/cpu_entry_area.h>
+ 
++struct depriv_ops {
++	bool (*enter)(struct task_struct *);
++	void (*exit)(void);
++	void (*free_pidns_cb)(struct pid_namespace *ns);
++};
++
+ DECLARE_PER_CPU(void *, depriv_cpu_state);
+ 
+ extern void asm_depriv_exit(void);
+diff --git a/include/linux/depriv.h b/include/linux/depriv.h
+index 389325138f41..87453889dcc3 100644
+--- a/include/linux/depriv.h
++++ b/include/linux/depriv.h
+@@ -2,11 +2,8 @@
+ #ifndef _DEPRIV_H
+ #define _DEPRIV_H
+ 
+-struct depriv_ops {
+-	bool (*enter)(void);
+-	void (*exit)(void);
+-};
++#include <linux/pid_namespace.h>
+ 
+-extern struct depriv_ops depriv_ops;
++void depriv_free_pidns_callback(struct pid_namespace *ns);
+ 
+ #endif /* _DEPRIV_H */
+diff --git a/kernel/pid_namespace.c b/kernel/pid_namespace.c
+index a46a3723bc66..8c799fd5c538 100644
+--- a/kernel/pid_namespace.c
++++ b/kernel/pid_namespace.c
+@@ -23,6 +23,7 @@
+ #include <linux/sched/task.h>
+ #include <linux/sched/signal.h>
+ #include <linux/idr.h>
++#include <linux/depriv.h>
+ 
+ static DEFINE_MUTEX(pid_caches_mutex);
+ static struct kmem_cache *pid_ns_cachep;
+@@ -128,6 +129,8 @@ static void delayed_free_pidns(struct rcu_head *p)
+ 	dec_pid_namespaces(ns->ucounts);
+ 	put_user_ns(ns->user_ns);
+ 
++	depriv_free_pidns_callback(ns);
++
+ 	kmem_cache_free(pid_ns_cachep, ns);
+ }
+ 
+-- 
+2.34.1
+

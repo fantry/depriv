@@ -1,0 +1,64 @@
+From fc80ffd9c3f8c1e0bd47ee712a8797f878429f25 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 21 Jan 2021 18:25:44 -0800
+Subject: [PATCH 134/140] improve vmcall debugging
+
+---
+ arch/x86/depriv/vmx/depriv.c | 20 ++++++++++++++------
+ 1 file changed, 14 insertions(+), 6 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index a467b22028c6..45f651f45fa5 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -287,6 +287,7 @@ static void vmx_depriv_cpu(void *info)
+ static inline void vmx_vmcall(long call_no, void *info)
+ {
+ 	int cpu = raw_smp_processor_id();
++	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+ 
+ 	if (call_no < VMX_VMCALL_FIRST || call_no > VMX_VMCALL_LAST) {
+ 		pr_err("depriv: cpu%d invalid vmcall no %ld\n", cpu, call_no);
+@@ -296,6 +297,15 @@ static inline void vmx_vmcall(long call_no, void *info)
+ 	asm_volatile_goto("1: vmcall\n\t"
+ 			  _ASM_EXTABLE(1b, %l[fault])
+ 			  : : "D" (call_no), "S" (info) : : fault);
++
++	pr_info("depriv: cpu%d vmcalled\n", cpu);
++	if (host_cpu_state) {
++		long host_rsp = (unsigned long)host_cpu_state
++			+ DEPRIV_CPU_STATE_VMCS_MSR_BITMAP - DEPRIV_HOST_STACK_RESERVED_BYTES;
++		unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
++		pr_info("depriv: cpu%d (%ld) vmcalled\n", cpu, *cnt);
++	}
++
+ 	return;
+ 
+ fault:
+@@ -435,8 +445,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		pr_debug("depriv: cpu%d (%ld) exit reason: %d cpu depriv mode mask: %*pb[l]\n",
+ 			 cpu, counter, reason, cpumask_pr_args(&cpu_depriv_mode_mask));
+ 
+-		DEPRIV_DUMP_GPRS(regs);
+-
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
+ 		switch (call_no) {
+@@ -453,10 +461,10 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 			break;
+ 		default:
+-			pr_err("depriv: cpu%d (%ld) invalid vmcall no %ld, switching to root mode\n",
+-			       cpu, counter, call_no);
+-			vmcs_writel(GUEST_RIP, rip + insn_len);
+-			DEPRIV_SWITCH_TO_ROOT_MODE;
++			pr_err("depriv: cpu%d (%ld) invalid vmcall no %ld @ %#lx\n",
++			       cpu, counter, call_no, rip);
++			DEPRIV_DUMP_GPRS(regs);
++			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 			break;
+ 		}
+ 		break;
+-- 
+2.34.1
+

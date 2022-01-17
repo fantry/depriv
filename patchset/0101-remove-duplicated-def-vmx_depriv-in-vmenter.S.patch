@@ -1,0 +1,37 @@
+From 0f17b36c0764c129017d9c7743328971913ca89e Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 11 Aug 2020 11:21:46 -0700
+Subject: [PATCH 101/140] remove duplicated def vmx_depriv in vmenter.S
+
+---
+ arch/x86/kvm/vmx/vmenter.S | 14 --------------
+ 1 file changed, 14 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmenter.S b/arch/x86/kvm/vmx/vmenter.S
+index 696d1445635c..435c187927c4 100644
+--- a/arch/x86/kvm/vmx/vmenter.S
++++ b/arch/x86/kvm/vmx/vmenter.S
+@@ -237,20 +237,6 @@ SYM_FUNC_END(__vmx_vcpu_run)
+ 
+ 
+ .section .text, "ax"
+-SYM_FUNC_START(vmx_depriv)
+-	/* Enter non-root mode */
+-	vmlaunch
+-	/* Jump on VM-Fail. */
+-	jmp 1f
+-
+-/* vmlaunch succeeded */
+-SYM_CODE_START(vmx_depriv_guest_rip)
+-	xor %eax, %eax
+-	ret
+-
+-1:	mov $1, %eax
+-	ret
+-SYM_FUNC_END(vmx_depriv)
+ 
+ /**
+  * vmread_error_trampoline - Trampoline from inline asm to vmread_error()
+-- 
+2.34.1
+

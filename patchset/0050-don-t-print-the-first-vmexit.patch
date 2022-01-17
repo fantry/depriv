@@ -1,0 +1,34 @@
+From ed2c65b47b339df9b6b940a5117cc4b381e6079b Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 22:22:11 -0700
+Subject: [PATCH 050/140] don't print the first vmexit
+
+---
+ arch/x86/kvm/vmx/depriv.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index bbc32463f767..3dc31f47c346 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1429,6 +1429,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ 	regs[VCPU_REGS_RSP] = rsp;
+ 
++	(*cnt)++;
++
+ 	if (reason & VMX_EXIT_REASONS_FAILED_VMENTRY) {
+ 		pr_err("depriv: cpu%d (%ld) VM-entry failed @ rip: %#lx rsp: %#lx\n",
+ 		       cpu, *cnt, rip, rsp);
+@@ -1445,8 +1447,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx\n",
+ 			cpu, *cnt, reason, rip, rsp);
+ 
+-	(*cnt)++;
+-
+ 	switch (reason) {
+ 	case EXIT_REASON_EXCEPTION_NMI: {
+ 		bool continue_in_root_mode = true;
+-- 
+2.34.1
+

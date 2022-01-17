@@ -1,0 +1,173 @@
+From 3c7db34744ac6f6f077e500a11330ae2c3d7a782 Mon Sep 17 00:00:00 2001
+From: lxin <lxin@localhost.localdomain>
+Date: Tue, 16 Jun 2020 10:21:18 -0700
+Subject: [PATCH 039/140] reduce FS/GS log messages
+
+---
+ arch/x86/kvm/vmx/depriv.c | 53 +++++++++++++++++++++------------------
+ 1 file changed, 28 insertions(+), 25 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 6055f30dab7f..56a8e070fd70 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -575,13 +575,13 @@ static int __init setup_depriv_vmcs_config(void)
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_LOAD_EXITING) {
+ 		// if EPT is available, it's OK to disable this control
+ 		_cpu_based_exec_control &= ~CPU_BASED_CR3_LOAD_EXITING;
+-		pr_info("depriv: disabled cr3 load exiting\n");
++		pr_debug("depriv: disabled cr3 load exiting\n");
+ 	}
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_STORE_EXITING) {
+ 		// if EPT is available, it's OK to disable this control
+ 		_cpu_based_exec_control &= ~CPU_BASED_CR3_STORE_EXITING;
+-		pr_info("depriv: disabled cr3 store exiting\n");
++		pr_debug("depriv: disabled cr3 store exiting\n");
+ 	}
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_INVLPG_EXITING) {
+@@ -812,12 +812,12 @@ static void __init vmx_depriv_cpu_segments(unsigned long gdt_base)
+ 	DEPRIV_SEGMENT(GS, false);
+ 
+ 	base = read_msr(MSR_FS_BASE);
+-	pr_info("depriv: cpu%d FS base MSR %#lx\n", cpu, base);
++	pr_debug("depriv: cpu%d FS base MSR %#lx\n", cpu, base);
+ 	vmcs_writel(HOST_FS_BASE, base);
+ 	vmcs_writel(GUEST_FS_BASE, base);
+ 
+ 	base = read_msr(MSR_GS_BASE);
+-	pr_info("depriv: cpu%d GS base MSR %#lx\n", cpu, base);
++	pr_debug("depriv: cpu%d GS base MSR %#lx\n", cpu, base);
+ 	vmcs_writel(HOST_GS_BASE, base);
+ 	vmcs_writel(GUEST_GS_BASE, base);
+ }
+@@ -943,18 +943,18 @@ static void vmx_repriv_cpu_release_resources(void)
+ 	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+ 	struct vmcs *vmcs = per_cpu(depriv_vmcs, cpu);
+ 
+-	pr_info("depriv: reprivilege cpu%d releasing resources\n", cpu);
+-
+ 	if (host_cpu_state) {
+ 		per_cpu(depriv_cpu_state, cpu) = NULL;
+ 		memset(host_cpu_state, 0, DEPRIV_CPU_STATE_BUFFER_SIZE);
+ 		free_pages((unsigned long)host_cpu_state, DEPRIV_CPU_STATE_PAGE_ORDER);
++		pr_info("depriv: repriv cpu%d released cpu state buffer\n", cpu);
+ 	}
+ 
+ 	if (vmcs) {
+ 		per_cpu(depriv_vmcs, cpu) = NULL;
+ 		vmcs_clear(vmcs);
+ 		free_vmcs(vmcs);
++		pr_info("depriv: repriv cpu%d released root mode VMCS\n", cpu);
+ 	}
+ 
+ 	--depriv_cpu_count;
+@@ -1121,8 +1121,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(0);
+ 
+-	pr_info("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n",
+-		cpu, rip, rsp);
++	pr_debug("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n", cpu, rip, rsp);
+ 
+ 	if (test_handle_vmlaunch_failure)
+ 		vmcs_write32(CR3_TARGET_COUNT, 0x100000);
+@@ -1210,14 +1209,14 @@ static inline void vmx_repriv_cpu_misc(void)
+ 	wrmsrl(MSR_IA32_DEBUGCTLMSR, vmcs_read64(GUEST_IA32_DEBUGCTL));
+ }
+ 
+-#define REPRIV_SEGMENT(tag, TAG) do {					\
+-	ar = vmcs_read32(GUEST_##TAG##S_AR_BYTES);			\
+-	if (ar & VMX_AR_UNUSABLE_MASK)					\
+-		pr_info("depriv: cpu%d " #TAG "S unusable\n", cpu);	\
+-	sel = vmcs_read16(GUEST_##TAG##S_SELECTOR);			\
+-	loadsegment(tag##s, sel);					\
+-	vmcs_write16(HOST_##TAG##S_SELECTOR, sel);			\
+-	pr_info("depriv: cpu%d " #TAG "S %#x\n", cpu, sel);		\
++#define REPRIV_SEGMENT(tag, TAG) do {						\
++	ar = vmcs_read32(GUEST_##TAG##S_AR_BYTES);				\
++	if (ar & VMX_AR_UNUSABLE_MASK)						\
++		pr_debug("depriv: repriv cpu%d " #TAG "S unusable\n", cpu);	\
++	sel = vmcs_read16(GUEST_##TAG##S_SELECTOR);				\
++	loadsegment(tag##s, sel);						\
++	vmcs_write16(HOST_##TAG##S_SELECTOR, sel);				\
++	pr_debug("depriv: repriv cpu%d " #TAG "S %#x\n", cpu, sel);		\
+ } while (0)
+ 
+ static inline void vmx_repriv_cpu_segments(void)
+@@ -1232,16 +1231,16 @@ static inline void vmx_repriv_cpu_segments(void)
+ 
+ 	ar = vmcs_read32(GUEST_FS_AR_BYTES);
+ 	if (ar & VMX_AR_UNUSABLE_MASK)
+-		pr_info("depriv: repriv cpu%d FS unusable\n", cpu);
++		pr_debug("depriv: repriv cpu%d FS unusable\n", cpu);
+ 
+ 	sel = vmcs_read16(GUEST_FS_SELECTOR);
+ 	loadsegment(fs, sel);
+-	pr_info("depriv: repriv cpu%d FS selector: %#x\n", cpu, sel);
++	pr_debug("depriv: repriv cpu%d FS selector: %#x\n", cpu, sel);
+ 	vmcs_write16(HOST_FS_SELECTOR, sel);
+ 
+ 	host_base = read_msr(MSR_FS_BASE);
+ 	base = vmcs_readl(GUEST_FS_BASE);
+-	pr_info("depriv: repriv cpu%d FS base: %#lx\n", cpu, base);
++	pr_debug("depriv: repriv cpu%d FS base: %#lx\n", cpu, base);
+ 	if (host_base != base)
+ 		wrmsrl(MSR_FS_BASE, base);
+ 	vmcs_writel(HOST_FS_BASE, base);
+@@ -1249,15 +1248,15 @@ static inline void vmx_repriv_cpu_segments(void)
+ 	// never change GS BASE, which points to kernel mode per-CPU data
+ 	ar = vmcs_read32(GUEST_GS_AR_BYTES);
+ 	if (ar & VMX_AR_UNUSABLE_MASK)
+-		pr_info("depriv: repriv cpu%d GS unusable\n", cpu);
++		pr_debug("depriv: repriv cpu%d GS unusable\n", cpu);
+ 
+ 	sel = vmcs_read16(GUEST_GS_SELECTOR);
+ 	load_gs_index(sel);
+-	pr_info("depriv: repriv cpu%d GS selector: %#x\n", cpu, sel);
++	pr_debug("depriv: repriv cpu%d GS selector: %#x\n", cpu, sel);
+ 	vmcs_write16(HOST_GS_SELECTOR, sel);
+ 
+ 	base = vmcs_readl(GUEST_GS_BASE);
+-	pr_info("depriv: repriv cpu%d GS base: %#lx\n", cpu, base);
++	pr_debug("depriv: repriv cpu%d GS base: %#lx\n", cpu, base);
+ }
+ 
+ static inline void vmx_repriv_cpu_ldtr(void)
+@@ -1323,9 +1322,12 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ static void vmx_repriv_cpu(void *info)
+ {
+ 	int cpu = smp_processor_id();
++	struct vmcs *vmcs = per_cpu(depriv_vmcs, cpu);
+ 	bool *to_root_mode;
+ 
+-	if (!per_cpu(depriv_vmcs, cpu)) {
++	pr_info("depriv: repriv cpu%d root mode VMCS %p\n", cpu, vmcs);
++
++	if (!vmcs) {
+ 		pr_info("depriv: cpu%d already reprivileged\n", cpu);
+ 		return;
+ 	}
+@@ -1375,8 +1377,8 @@ static void vmx_repriv_cpu_state(void)
+ 
+ #define DEPRIV_CONTINUE_IN_ROOT_MODE(ins_len) do {				\
+ 	vmx_repriv_cpu_state();							\
+-	pr_info("depriv: cpu%d exit reason %d skip %d bytes instruction and "	\
+-		"continue in root mode\n",					\
++	pr_info("depriv: repriv cpu%d exit reason %d skip %d bytes instruction "\
++		"and continue in root mode\n",					\
+ 		cpu, reason, ins_len);						\
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ins_len);				\
+ 	return false;								\
+@@ -1649,6 +1651,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			handle_cr3_access(host_rsp, regs, qualification);
+ 			break;
+ 		case 4:
++			DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 			handle_cr4_access(host_rsp, regs, qualification);
+ 			break;
+ 		default:
+-- 
+2.34.1
+

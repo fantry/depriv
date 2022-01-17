@@ -1,0 +1,28 @@
+From 3c86866837417ccb7665312e32e48ddb50a85afc Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Mon, 15 Jun 2020 03:46:36 -0700
+Subject: [PATCH 033/140] set cr2 upon page fault VM-exit
+
+---
+ arch/x86/kvm/vmx/depriv.c | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 088b49450da4..8cb7b9e27684 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1518,8 +1518,10 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			pr_info("depriv: cpu%d (%ld) hit UD @ rip %#lx insn: %s\n",
+ 				cpu, *cnt, rip, insn);
+ 		} else if (is_page_fault(intr_info)) {
++			unsigned long cr2 = vmcs_readl(EXIT_QUALIFICATION);
+ 			pr_info("depriv: cpu%d (%ld) page fault @ %#lx with error code %#x\n",
+-				cpu, *cnt, vmcs_readl(EXIT_QUALIFICATION), error_code);
++				cpu, *cnt, cr2, error_code);
++			native_write_cr2(cr2);
+ 			continue_in_root_mode = false;
+ 		} else if (is_gp_fault(intr_info)) {
+ 			continue_in_root_mode = false;
+-- 
+2.34.1
+

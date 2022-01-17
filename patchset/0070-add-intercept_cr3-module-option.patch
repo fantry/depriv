@@ -1,0 +1,87 @@
+From 55fb2f897ccb1752f3dddae44efe4baa331a04ed Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 20 Jun 2020 10:09:25 -0700
+Subject: [PATCH 070/140] add intercept_cr3 module option
+
+---
+ arch/x86/kvm/vmx/depriv.c         | 24 ++++++++++++++++--------
+ arch/x86/kvm/vmx/depriv_handler.c |  8 ++++----
+ 2 files changed, 20 insertions(+), 12 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index bbc9335207d3..21fbede57b01 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -36,6 +36,9 @@ module_param(exception_bitmap, uint, 0444);
+ static bool __read_mostly intercept_msr = 0;
+ module_param(intercept_msr, bool, S_IRUGO);
+ 
++static bool __read_mostly intercept_cr3 = 0;
++module_param(intercept_cr3, bool, S_IRUGO);
++
+ /*
+  * host state memory buffer page order
+  */
+@@ -117,20 +120,25 @@ static int __init setup_depriv_vmcs_config(void)
+ 	}
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_LOAD_EXITING) {
+-		// if EPT is available, it's OK to disable this control
+-		_cpu_based_exec_control &= ~CPU_BASED_CR3_LOAD_EXITING;
+-		pr_debug("depriv: disabled cr3 load exiting\n");
++		if (intercept_cr3)
++			pr_info("depriv: load cr3 causes VM exits\n");
++		else {
++			_cpu_based_exec_control &= ~CPU_BASED_CR3_LOAD_EXITING;
++			pr_debug("depriv: disabled cr3 load exiting\n");
++		}
+ 	}
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_STORE_EXITING) {
+-		// if EPT is available, it's OK to disable this control
+-		_cpu_based_exec_control &= ~CPU_BASED_CR3_STORE_EXITING;
+-		pr_debug("depriv: disabled cr3 store exiting\n");
++		if (intercept_cr3)
++			pr_info("depriv: store cr3 causes VM exits\n");
++		else {
++			_cpu_based_exec_control &= ~CPU_BASED_CR3_STORE_EXITING;
++			pr_debug("depriv: disabled cr3 store exiting\n");
++		}
+ 	}
+ 
+-	if (_cpu_based_exec_control & CPU_BASED_INVLPG_EXITING) {
++	if (_cpu_based_exec_control & CPU_BASED_INVLPG_EXITING)
+ 		pr_info("depriv: invlpg causes VM exits\n");
+-	}
+ 
+ 	min = VM_EXIT_SAVE_DEBUG_CONTROLS |
+ 	      VM_EXIT_HOST_ADDR_SPACE_SIZE;
+diff --git a/arch/x86/kvm/vmx/depriv_handler.c b/arch/x86/kvm/vmx/depriv_handler.c
+index ce21ef2e5343..e29301ab6bd5 100644
+--- a/arch/x86/kvm/vmx/depriv_handler.c
++++ b/arch/x86/kvm/vmx/depriv_handler.c
+@@ -64,8 +64,8 @@ static void handle_cr3_access(unsigned long *regs, unsigned long cnt)
+ 		cr3 &= ~X86_CR3_PCID_NOFLUSH;
+ 		vmcs_writel(GUEST_CR3, cr3);
+ 
+-		pr_debug("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx)\n",
+-			 cpu, cnt, reg, cr3, regs[reg]);
++		pr_info("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx)\n",
++			cpu, cnt, reg, cr3, regs[reg]);
+ 		break;
+ 	}
+ 	case 1: /*mov from cr*/
+@@ -75,8 +75,8 @@ static void handle_cr3_access(unsigned long *regs, unsigned long cnt)
+ 		if (reg == VCPU_REGS_RSP)
+ 			vmcs_writel(GUEST_RSP, regs[reg]);
+ 
+-		pr_debug("depriv: cpu%d (%ld) read cr3 to reg%d: %#lx\n",
+-			 cpu, cnt, reg, regs[reg]);
++		pr_info("depriv: cpu%d (%ld) read cr3 to reg%d: %#lx\n",
++			cpu, cnt, reg, regs[reg]);
+ 		break;
+ 	}
+ }
+-- 
+2.34.1
+

@@ -1,0 +1,39 @@
+From 69f4b8e44857f4bec56dfcee0126f11f279fde4e Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Mon, 22 Jun 2020 00:09:14 -0700
+Subject: [PATCH 082/140] dump cr3 value in page table walking
+
+---
+ arch/x86/kvm/vmx/depriv.c | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index da241a493334..587112dc8b45 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -806,6 +806,8 @@ static inline u64 depriv_iret_stack_base(int cpu)
+ static void dump_va_page_table_entry(void *virtual_address)
+ {
+ 	int cpu = raw_smp_processor_id(), i;
++	unsigned long host_cr3 = vmcs_readl(HOST_CR3);
++	unsigned long guest_cr3 = vmcs_readl(GUEST_CR3);
+ 	unsigned long *host_pte;
+ 	unsigned long *guest_pte;
+ 	unsigned long va = (unsigned long)virtual_address;
+@@ -813,8 +815,11 @@ static void dump_va_page_table_entry(void *virtual_address)
+ 	bool host_pte_valid = true;
+ 	bool guest_pte_valid = true;
+ 
+-	host_pte = (unsigned long *)__va(vmcs_readl(HOST_CR3) & CR3_ADDR_MASK);
+-	guest_pte = (unsigned long *)__va(vmcs_readl(GUEST_CR3) & CR3_ADDR_MASK);
++	pr_info("depriv: cpu%d  host cr3: 0x%016lx\n", cpu, host_cr3);
++	pr_info("depriv: cpu%d guest cr3: 0x%016lx\n", cpu, guest_cr3);
++
++	host_pte = (unsigned long *)__va(host_cr3 & CR3_ADDR_MASK);
++	guest_pte = (unsigned long *)__va(guest_cr3 & CR3_ADDR_MASK);
+ 
+ 	for (i = 4; i > 0; i--) {
+ 		u32 slot = (u32)(va >> va_shift) & 0x1fful;
+-- 
+2.34.1
+

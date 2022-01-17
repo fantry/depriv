@@ -1,0 +1,125 @@
+From a09ef9f38090e89e66b51c61016c15738a2f146b Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Fri, 26 Jun 2020 16:13:23 -0700
+Subject: [PATCH 100/140] smarter cr3 switches
+
+---
+ arch/x86/entry/entry_64.S | 14 ++++++--------
+ arch/x86/kvm/vmx/depriv.c | 39 +++++++++++++++++----------------------
+ 2 files changed, 23 insertions(+), 30 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 241043554ce7..564618ee19a6 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1415,16 +1415,14 @@ nmi_restore:
+ SYM_CODE_END(asm_exc_nmi)
+ 
+ SYM_CODE_START(depriv_switch_to_root_mode)
+-	push	%rax
++	testb	$3, 8(%rsp)
++	jz	1f
+ 
+-	/*
+-	 * switch to guest CR3
+-	 */
+-	mov	6*8(%rsp), %rax
+-	mov	%rax, %cr3
++	pushq	%rdi
++	SWITCH_TO_USER_CR3_STACK scratch_reg=%rdi
++	popq	%rdi
+ 
+-	pop	%rax
+-	SWAPGS
++1:	SWAPGS
+ 	INTERRUPT_RETURN
+ SYM_CODE_END(depriv_switch_to_root_mode)
+ EXPORT_SYMBOL(depriv_switch_to_root_mode)
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 251ea832fde6..07ff8b405532 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -67,7 +67,6 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ #define DEPRIV_IRET_STACK_GUEST_RFLAGS		(2 * 8)
+ #define DEPRIV_IRET_STACK_GUEST_RSP		(3 * 8)
+ #define DEPRIV_IRET_STACK_GUEST_SS		(4 * 8)
+-#define DEPRIV_IRET_STACK_GUEST_CR3		(5 * 8)
+ 
+ #define DEPRIV_INVALID_HOST_CR3_TARGET_COUNT	0x100000
+ 
+@@ -816,8 +815,6 @@ void vmx_repriv_cpu(void *info)
+ 	(*(unsigned long *)(base + DEPRIV_IRET_STACK_GUEST_RSP))
+ #define DEPRIV_IRET_STACK_SS(base)						\
+ 	(*(unsigned long *)(base + DEPRIV_IRET_STACK_GUEST_SS))
+-#define DEPRIV_IRET_STACK_CR3(base)						\
+-	(*(unsigned long *)(base + DEPRIV_IRET_STACK_GUEST_CR3))
+ 
+ #define DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(base) do {			\
+ 	DEPRIV_IRET_STACK_RIP(base)	= vmcs_readl(GUEST_RIP);		\
+@@ -825,7 +822,6 @@ void vmx_repriv_cpu(void *info)
+ 	DEPRIV_IRET_STACK_RFLAGS(base)	= vmcs_readl(GUEST_RFLAGS);		\
+ 	DEPRIV_IRET_STACK_RSP(base)	= vmcs_readl(GUEST_RSP);		\
+ 	DEPRIV_IRET_STACK_SS(base)	= vmcs_read16(GUEST_SS_SELECTOR);	\
+-	DEPRIV_IRET_STACK_CR3(base)	= vmcs_readl(GUEST_CR3);		\
+ } while (0)
+ 
+ void depriv_switch_to_root_mode(void);
+@@ -851,7 +847,7 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ 	vmcs_write16(GUEST_SS_SELECTOR, seg);
+ 	DEPRIV_SELECTOR(SS, seg);
+ 
+-	vmcs_writel(GUEST_CR3, vmcs_readl(HOST_CR3));
++	vmcs_writel(GUEST_CR3, __read_cr3());
+ 	vmcs_writel(GUEST_GS_BASE, vmcs_readl(HOST_GS_BASE));
+ 
+ 	vmcs_write32(CR3_TARGET_COUNT, 0);
+@@ -869,7 +865,22 @@ bool vmx_repriv_cpu_state(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	unsigned long stack = depriv_iret_trampoline_stack(cpu);
+-	unsigned long cr3;
++	unsigned long cr3 = vmcs_readl(GUEST_CR3);
++	unsigned long trampoline_cr3_pa = cr3 & CR3_ADDR_MASK;
++
++#ifdef CONFIG_PAGE_TABLE_ISOLATION
++/*
++ * the following macros are from arch/x86/entry/calling.h
++ */
++#define PTI_USER_PGTABLE_BIT		PAGE_SHIFT
++#define PTI_USER_PGTABLE_MASK		(1 << PTI_USER_PGTABLE_BIT)
++
++	if (boot_cpu_has(X86_FEATURE_PTI))
++		trampoline_cr3_pa &= ~PTI_USER_PGTABLE_MASK;
++#endif
++
++	// make sure we can call vmx_repriv_cpu_release_resources()
++	native_write_cr3(trampoline_cr3_pa | (cr3 & 0x7ff));
+ 
+ 	if (vmcs_read32(CR3_TARGET_COUNT) == DEPRIV_INVALID_HOST_CR3_TARGET_COUNT)
+ 		pr_err("depriv: cpu%d invalid host state @ rip: %#lx rsp: %#lx\n",
+@@ -898,22 +909,6 @@ bool vmx_repriv_cpu_state(void)
+ 	pr_info("depriv: cpu%d switching to root mode GS base %#lx kernel GS base %#lx\n",
+ 		cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ 
+-	cr3 = vmcs_readl(GUEST_CR3) & CR3_ADDR_MASK;
+-
+-#ifdef CONFIG_PAGE_TABLE_ISOLATION
+-/*
+- * the following macros are from arch/x86/entry/calling.h
+- */
+-#define PTI_USER_PGTABLE_BIT		PAGE_SHIFT
+-#define PTI_USER_PGTABLE_MASK		(1 << PTI_USER_PGTABLE_BIT)
+-#endif
+-
+-	if (boot_cpu_has(X86_FEATURE_PTI))
+-		cr3 &= ~PTI_USER_PGTABLE_MASK;
+-
+-	// make sure we can call vmx_repriv_cpu_release_resources()
+-	native_write_cr3(cr3);
+-
+ 	vmx_repriv_cpu_release_resources();
+ 	return true;
+ }
+-- 
+2.34.1
+

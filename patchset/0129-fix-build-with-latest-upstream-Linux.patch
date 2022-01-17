@@ -1,0 +1,25 @@
+From b8841da5416e35ef15168b8cd71e1768ceb06134 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 24 Oct 2020 14:55:06 -0700
+Subject: [PATCH 129/140] fix build with latest upstream Linux
+
+---
+ arch/x86/depriv/vmx/vmx.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/x86/depriv/vmx/vmx.c b/arch/x86/depriv/vmx/vmx.c
+index bc5026c329f4..4ec0b95555ca 100644
+--- a/arch/x86/depriv/vmx/vmx.c
++++ b/arch/x86/depriv/vmx/vmx.c
+@@ -154,7 +154,7 @@ int __init setup_vmcs_config(void)
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS) {
+ 		min2 = 0;
+-		opt2 = SECONDARY_EXEC_RDTSCP |
++		opt2 = SECONDARY_EXEC_ENABLE_RDTSCP |
+ 		       SECONDARY_EXEC_ENABLE_EPT |
+ 		       SECONDARY_EXEC_ENABLE_INVPCID |
+ 		       SECONDARY_EXEC_XSAVES;
+-- 
+2.34.1
+

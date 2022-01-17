@@ -1,0 +1,211 @@
+From 782b65aa967a21eea98cf1878d061072ed7809e1 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 15 Sep 2020 09:49:39 -0700
+Subject: [PATCH 115/140] now I can run tests 100 times
+
+---
+ arch/x86/depriv/vmx/depriv.c         | 89 +++++++++++++++++++---------
+ arch/x86/depriv/vmx/depriv_handler.c |  2 +-
+ 2 files changed, 63 insertions(+), 28 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 5257c00f038f..a746924f9005 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -622,7 +622,7 @@ static void __hardware_disable(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 
+-	pr_info("depriv: disabling VMX on cpu%d\n", cpu);
++	pr_debug("depriv: disabling VMX on cpu%d\n", cpu);
+ 
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+ 		return;
+@@ -717,7 +717,7 @@ static bool __vmx_depriv(bool launch)
+ 
+ static inline int __cpu_vmxon(u64 vmxon_pointer)
+ {
+-	u64 msr;
++	int cpu;
+ 
+ 	cr4_set_bits(X86_CR4_VMXE);
+ 	intel_pt_handle_vmx(1);
+@@ -729,11 +729,10 @@ static inline int __cpu_vmxon(u64 vmxon_pointer)
+ 	return 0;
+ 
+ fault:
+-	WARN_ONCE(1, "depriv: VMXON faulted, MSR_IA32_FEAT_CTL (0x3a) = 0x%llx\n",
+-		  rdmsrl_safe(MSR_IA32_FEAT_CTL, &msr) ? 0xdeadbeef : msr);
++	cpu = raw_smp_processor_id();
++	pr_err("depriv: cpu%d VMXON faulted\n", cpu);
+ 	intel_pt_handle_vmx(0);
+ 	cr4_clear_bits(X86_CR4_VMXE);
+-
+ 	return -EFAULT;
+ }
+ 
+@@ -742,6 +741,8 @@ static inline int __hardware_enable(struct vmcs *vmcs)
+ 	int cpu = raw_smp_processor_id();
+ 	int r;
+ 
++	pr_debug("depriv: enabling VMX on cpu%d\n", cpu);
++
+ 	if (__read_cr4() & X86_CR4_VMXE) {
+ 		pr_err("depriv: CR4.VMXE already set on cpu%d\n", cpu);
+ 		return -EBUSY;
+@@ -783,14 +784,15 @@ static inline struct vmcs *alloc_vmcs(void)
+ 
+ static void vmx_depriv_cpu(void *info)
+ {
+-	int cpu = raw_smp_processor_id();
+-	unsigned long cr3_pa = (unsigned long)info;
++	int cpu = raw_smp_processor_id(), r;
++	unsigned long cr3_pa = (unsigned long)info, host_rsp, flags;
+ 	struct page *page = NULL;
+ 	struct vmcs *vmcs = NULL;
+ 	void *host_cpu_state, *host_cr3_va, *msr_bitmap;
+ 	struct depriv_loaded_vmcs *loaded_vmcs = NULL;
+-	unsigned long host_rsp;
+-	int r;
++
++	preempt_disable();
++	local_irq_save(flags);
+ 
+ 	// memory for root mode VM exit handler
+ 	page = __alloc_pages_node(cpu_to_node(cpu), GFP_KERNEL, DEPRIV_CPU_STATE_PAGE_ORDER);
+@@ -865,12 +867,14 @@ static void vmx_depriv_cpu(void *info)
+ 	}
+ 
+ 	/* switching to non-root mode */
+-	if (__vmx_depriv(true))
+-		return;
++	if (!__vmx_depriv(true)) {
++		pr_err("depriv: cpu%d failed to deprivilege\n", cpu);
++		//__hardware_disable();
++	}
+ 
+ error:
+-	pr_info("depriv: got to disable VMX on cpu%d\n", cpu);
+-	__hardware_disable();
++	local_irq_restore(flags);
++	preempt_enable();
+ }
+ 
+ static void vmx_repriv_cpu_crs(void)
+@@ -1031,24 +1035,41 @@ static inline void __vmx_repriv(void)
+ 	asm_volatile_goto("1: vmcall\n\t"
+ 			  _ASM_EXTABLE(1b, %l[fault])
+ 			  : : : : fault);
++	return;
++
+ fault:
++	pr_info("depriv: vmcall faulted, cpu%d already in root mode\n", cpu);
+ 	return;
+ }
+ 
+ static void vmx_repriv(void)
+ {
+-	int cpu = raw_smp_processor_id();
+-	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+-	unsigned long root_mode_rsp = (unsigned long)host_cpu_state + PAGE_SIZE
+-					- DEPRIV_HOST_STACK_RESERVED_BYTES;
+-	bool *in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH);
++	int cpu;
++	unsigned long flags, root_mode_rsp;
++	bool *in_depriv_switch;
+ 
+ 	if (test_handle_invalid_host_state || test_handle_invalid_guest_state)
+-		return;
++		goto out;
++
++	preempt_disable();
++	local_irq_save(flags);
++
++	cpu = raw_smp_processor_id();
++	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
++		goto out_irq;
++
++	root_mode_rsp = (unsigned long)per_cpu(depriv_cpu_state, cpu) + PAGE_SIZE
++			- DEPRIV_HOST_STACK_RESERVED_BYTES;
++	in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH);
+ 
+ 	*in_depriv_switch = true;
+ 	__vmx_repriv();
+ 	*in_depriv_switch = false;
++out_irq:
++	local_irq_restore(flags);
++	preempt_enable();
++out:
++	return;
+ }
+ 
+ static void vmx_repriv_cpu(void *info)
+@@ -1183,7 +1204,7 @@ bool vmx_repriv_cpu_state(void)
+ 			"non-root GS base %#lx kernel GS base MSR %#lx (GS base MSR %#lx)\n",
+ 			cpu, vmcs_readl(GUEST_RIP), vmcs_readl(GUEST_RSP),
+ 			vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE), read_msr(MSR_GS_BASE));
+-		__hardware_disable();
++		//__hardware_disable();
+ 	}
+ 
+ 	return true;
+@@ -1292,22 +1313,36 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ static bool vmx_depriv(void)
+ {
+-	int cpu = raw_smp_processor_id();
+-	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+-	unsigned long root_mode_rsp = (unsigned long)host_cpu_state + PAGE_SIZE
+-					- DEPRIV_HOST_STACK_RESERVED_BYTES;
+-	bool *in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH), r;
++	int cpu;
++	unsigned long flags, root_mode_rsp;
++	bool *in_depriv_switch, r = false;
+ 
+ 	if (test_handle_invalid_host_state || test_handle_invalid_guest_state)
+-		return false;
++		goto out;
+ 
++	preempt_disable();
++	local_irq_save(flags);
++
++	cpu = raw_smp_processor_id();
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+-		return false;
++		goto out_irq;
++
++	root_mode_rsp = (unsigned long)per_cpu(depriv_cpu_state, cpu) + PAGE_SIZE
++			- DEPRIV_HOST_STACK_RESERVED_BYTES;
++	in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH);
+ 
+ 	*in_depriv_switch = true;
++
++	// What else should we sync to non-root mode?
++	vmcs_writel(GUEST_CR3, __read_cr3());
++
+ 	r = __vmx_depriv(false);
+ 	*in_depriv_switch = false;
+ 
++out_irq:
++	local_irq_restore(flags);
++	preempt_enable();
++out:
+ 	return r;
+ }
+ 
+diff --git a/arch/x86/depriv/vmx/depriv_handler.c b/arch/x86/depriv/vmx/depriv_handler.c
+index 99ab3e07e5a2..b380f1a53373 100644
+--- a/arch/x86/depriv/vmx/depriv_handler.c
++++ b/arch/x86/depriv/vmx/depriv_handler.c
+@@ -273,7 +273,7 @@ static int handle_cr_access(unsigned long *regs, unsigned long cnt)
+ 		break;
+ 	}
+ 
+-	pr_info("depriv: cpu%d (%ld) accessed cr%d\n", cpu, cnt, cr);
++	pr_debug("depriv: cpu%d (%ld) accessed cr%d\n", cpu, cnt, cr);
+ 	return 0;
+ }
+ 
+-- 
+2.34.1
+

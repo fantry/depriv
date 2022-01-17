@@ -1,0 +1,254 @@
+From e9fb000d1bf500a037919e59420068550f739f79 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Mon, 15 Jun 2020 03:43:17 -0700
+Subject: [PATCH 032/140] it booted up!!!
+
+---
+ arch/x86/kvm/vmx/depriv.c | 119 +++++++++++++-------------------------
+ 1 file changed, 41 insertions(+), 78 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 571c768b5d81..088b49450da4 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -17,6 +17,17 @@
+ MODULE_AUTHOR("Xin Li");
+ MODULE_LICENSE("GPL");
+ 
++/*
++ * the following macros are from arch/x86/entry/calling.h
++ */
++#ifdef CONFIG_PAGE_TABLE_ISOLATION
++#define PTI_USER_PGTABLE_BIT		PAGE_SHIFT
++#define PTI_USER_PGTABLE_MASK		(1 << PTI_USER_PGTABLE_BIT)
++#define PTI_USER_PCID_BIT		X86_CR3_PTI_PCID_USER_BIT
++#define PTI_USER_PCID_MASK		(1 << PTI_USER_PCID_BIT)
++#define PTI_USER_PGTABLE_AND_PCID_MASK  (PTI_USER_PCID_MASK | PTI_USER_PGTABLE_MASK)
++#endif
++
+ /*
+  * host state memory buffer page order
+  */
+@@ -558,8 +569,9 @@ static int __init setup_depriv_vmcs_config(void)
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_LOAD_EXITING) {
+ 		// if EPT is available, it's OK to disable this control
+-		_cpu_based_exec_control &= ~CPU_BASED_CR3_LOAD_EXITING;
+-		pr_info("depriv: disabled cr3 load exiting\n");
++		//_cpu_based_exec_control &= ~CPU_BASED_CR3_LOAD_EXITING;
++		//pr_info("depriv: disabled cr3 load exiting\n");
++		pr_info("depriv: keep cr3 load exiting\n");
+ 	}
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_STORE_EXITING) {
+@@ -622,8 +634,6 @@ static int __init setup_depriv_vmcs_config(void)
+ 
+ static void __init vmx_depriv_cpu_controls(void)
+ {
+-	u32 eb;
+-
+ 	vmcs_write32(PIN_BASED_VM_EXEC_CONTROL,
+ 		     depriv_vmcs_conf.pin_based_exec_ctrl);
+ 	vmcs_write32(CPU_BASED_VM_EXEC_CONTROL,
+@@ -640,8 +650,7 @@ static void __init vmx_depriv_cpu_controls(void)
+ 	vmcs_write32(VM_ENTRY_CONTROLS,
+ 		     depriv_vmcs_conf.vmentry_ctrl);
+ 
+-	eb = (1u << UD_VECTOR) | (1u << DF_VECTOR) | (1u << GP_VECTOR);
+-	vmcs_write32(EXCEPTION_BITMAP, eb);
++	vmcs_write32(EXCEPTION_BITMAP, 0);
+ 	vmcs_write32(PAGE_FAULT_ERROR_CODE_MASK, 0);
+ 	vmcs_write32(PAGE_FAULT_ERROR_CODE_MATCH, 0);
+ 	vmcs_write32(CR3_TARGET_COUNT, 0);
+@@ -1134,17 +1143,13 @@ static void __init vmx_depriv_cpu(void *info)
+ 		pr_info("depriv: cpu%d deprivileged: rsp=%#lx  rflags=%#lx\n",
+ 			cpu, rsp, rflags);
+ 
++		*to_root_mode = false;
+ 		fs_base = read_msr(MSR_FS_BASE);
+ 
+ 		loadsegment(fs, __KERNEL_DS);
+-
+-		*to_root_mode = false;
+ 		vmx_depriv_vmcall();
+-
+ 		loadsegment(fs, 0);
+ 		wrmsrl(MSR_FS_BASE, fs_base);
+-
+-		*to_root_mode = true;
+ 		vmx_depriv_vmcall();
+ 		return;
+ 	}
+@@ -1466,7 +1471,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	char insn[64];
+ 	int cpu = smp_processor_id();
+ 	u32 reason = vmcs_read32(VM_EXIT_REASON), insn_len = 0;
+-	static bool enable_log = false;
+ 
+ 	regs[VCPU_REGS_RSP] = rsp;
+ 
+@@ -1482,20 +1486,15 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 	}
+ 
++	if (!(*cnt % 100000))
++		pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx\n",
++			cpu, *cnt, reason, rip, rsp);
++
+ 	(*cnt)++;
+ 
+ 	dump_fsgs_base(host_rsp, reason);
+ 	vmx_depriv_cpu_sync_fsgs_base(host_rsp, reason);
+ 
+-	pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx FS base: %#lx\n",
+-		cpu, *cnt, reason, rip, rsp, vmcs_readl(GUEST_FS_BASE));
+-
+-	if (enable_log) {
+-		pr_info("depriv: cpu%d (%ld) exit reason:%#x rip:%#lx rsp:%#lx\n",
+-			cpu, *cnt, reason, rip, rsp);
+-		enable_log = false;
+-	}
+-
+ 	switch (reason) {
+ 	case EXIT_REASON_EXCEPTION_NMI: {
+ 		bool continue_in_root_mode = true;
+@@ -1547,15 +1546,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			pr_info("depriv: cpu%d (%ld) injecting exception %d, continue in non-root mode\n",
+ 				cpu, *cnt, vector);
+ 
+-			pr_info("depriv: cpu%d (%ld) guest FS base: %#lx\n",
+-				cpu, *cnt, vmcs_readl(GUEST_FS_BASE));
+-
+-			pr_info("depriv: cpu%d (%ld) guest GS base: %#lx guest kernel GS base: %#lx\n",
+-				cpu, *cnt, vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+-
+ 			DEPRIV_DUMP_GPRS;
+-			enable_log = true;
+-			vmx_check_guest_state();
+ 
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(0);
+ 		}
+@@ -1565,31 +1556,32 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		unsigned long qualification = vmcs_readl(EXIT_QUALIFICATION);
+ 		int cr = qualification & 0xf;
+ 		int reg = (qualification >> 8) & 0xf;
+-		unsigned long cr4 = vmcs_readl(GUEST_CR4);
+ 
+ 		if (cr != 3)
+ 			DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 
+-		if (cr4 & X86_CR4_PCIDE)
+-			pr_info("depriv: cpu%d (%ld) PCID enabled\n", cpu, *cnt);
+-		else
+-			pr_info("depriv: cpu%d (%ld) PCID disabled\n", cpu, *cnt);
+-
+ 		switch ((qualification >> 4) & 3) {
+ 		case 0: { /* mov to cr */
+-			unsigned long cr3 = regs[reg];
++			unsigned long cr3 = regs[reg], host_cr3;
+ 			unsigned long cr4 = vmcs_readl(GUEST_CR4);
+ 
+ 			if (!(cr4 & X86_CR4_PCIDE)) {
+-				pr_info("depriv: cpu%d (%ld) PCID disabled, fixing cr3\n", cpu, *cnt);
++				pr_debug("depriv: cpu%d (%ld) PCID disabled, fixing cr3\n", cpu, *cnt);
++				cr3 &= ~X86_CR3_PCID_NOFLUSH;
++			} else {
++				pr_debug("depriv: cpu%d (%ld) PCID enabled\n", cpu, *cnt);
+ 				cr3 &= ~X86_CR3_PCID_NOFLUSH;
+-			} else
+-				pr_info("depriv: cpu%d (%ld) PCID enabled\n", cpu, *cnt);
++			}
+ 
+ 			vmcs_writel(GUEST_CR3, cr3);
+ 
+-			pr_info("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx)\n",
+-				cpu, *cnt, cr, cr3, regs[reg]);
++			if (boot_cpu_has(X86_FEATURE_PTI))
++				host_cr3 = cr3 & ~PTI_USER_PGTABLE_AND_PCID_MASK;
++
++			vmcs_writel(HOST_CR3, host_cr3);
++
++			pr_debug("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx) host cr3: %#lx\n",
++				 cpu, *cnt, cr, cr3, regs[reg], host_cr3);
+ 			break;
+ 		}
+ 		case 1: /*mov from cr*/
+@@ -1605,28 +1597,14 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		}
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-		if (true) {
+-			pr_debug("depriv: cpu%d (%ld) accessed cr3 and continue in non-root mode\n",
+-				 cpu, *cnt);
+-			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+-		} else {
+-			pr_info("depriv: cpu%d (%ld) accessed cr3 and continue in root mode\n",
+-				cpu, *cnt);
+-			DEPRIV_CONTINUE_IN_ROOT_MODE(insn_len);
+-		}
++		pr_debug("depriv: cpu%d (%ld) accessed cr3 and continue in non-root mode\n",
++			 cpu, *cnt);
++		DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 	}
+ 
+ 	case EXIT_REASON_CPUID: {
+-		static int cnt_cpuid_0x2 = 0;
+-		pr_info("depriv: cpu%d (%ld) cpuid[%#x]\n", cpu, *cnt, (u32)regs[VCPU_REGS_RAX]);
+-
+-		if ((u32)regs[VCPU_REGS_RAX] == 0x2) {
+-			cnt_cpuid_0x2++;
+-			if (cnt_cpuid_0x2 == 20) {
+-				//vmcs_write32(EXCEPTION_BITMAP, 0xffffffff);
+-				pr_info("depriv: cpu%d (%ld) all fault VM-exit enabeld\n", cpu, *cnt);
+-			}
+-		}
++		if (!(*cnt % 100000))
++			pr_info("depriv: cpu%d (%ld) cpuid[%#x]\n", cpu, *cnt, (u32)regs[VCPU_REGS_RAX]);
+ 
+ 		native_cpuid((unsigned int *)&regs[VCPU_REGS_RAX],
+ 			     (unsigned int *)&regs[VCPU_REGS_RBX],
+@@ -1634,15 +1612,9 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			     (unsigned int *)&regs[VCPU_REGS_RDX]);
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-		if (true) {
+-			pr_debug("depriv: cpu%d (%ld) executed cpuid and continue in non-root mode\n",
+-				 cpu, *cnt);
+-			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+-		} else {
+-			pr_info("depriv: cpu%d (%ld) executed cpuid and continue in root mode\n",
+-				cpu, *cnt);
+-			DEPRIV_CONTINUE_IN_ROOT_MODE(insn_len);
+-		}
++		pr_debug("depriv: cpu%d (%ld) executed cpuid and continue in non-root mode\n",
++			 cpu, *cnt);
++		DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 	}
+ 
+ 	case EXIT_REASON_VMCALL: {
+@@ -1664,7 +1636,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	case EXIT_REASON_MSR_READ: {
+ 		u32 ecx = (u32)regs[VCPU_REGS_RCX];
+ 		unsigned long val;
+-		static int cnt_0x3b = 0;
+ 
+ 		if (ecx == MSR_FS_BASE) {
+ 			val = vmcs_readl(GUEST_FS_BASE);
+@@ -1681,14 +1652,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		else
+ 			pr_info("depriv: cpu%d (%ld) MSR[%#x]: %#lx\n", cpu, *cnt, ecx, val);
+ 
+-		if (ecx == 0x3b) {
+-			cnt_0x3b++;
+-			if (cnt_0x3b == 2) {
+-				//vmcs_write32(EXCEPTION_BITMAP, 0xffffffff);
+-				pr_info("depriv: cpu%d (%ld) all fault VM-exit enabeld\n", cpu, *cnt);
+-			}
+-		}
+-
+ 		*((u32 *)&regs[VCPU_REGS_RAX]) = (u32)val;
+ 		*((u32 *)&regs[VCPU_REGS_RDX]) = (u32)(val >> 32);
+ 
+-- 
+2.34.1
+

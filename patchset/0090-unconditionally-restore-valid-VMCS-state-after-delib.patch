@@ -1,0 +1,34 @@
+From 6b080924e68dbbe985a6bfdfaf091a91e885a05c Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 23 Jun 2020 11:19:12 -0700
+Subject: [PATCH 090/140] unconditionally restore valid VMCS state after
+ deliberately triggering vmlaunch/vmresume failures
+
+---
+ arch/x86/kvm/vmx/depriv.c | 10 +++-------
+ 1 file changed, 3 insertions(+), 7 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 24a693d83167..19a63881ae03 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -858,13 +858,9 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ 
+ 	vmcs_writel(GUEST_CR3, vmcs_readl(HOST_CR3));
+ 
+-	if (test_handle_invalid_host_state)
+-		vmcs_write32(CR3_TARGET_COUNT, 0);
+-
+-	if (test_handle_invalid_guest_state) {
+-		u32 ar = vmcs_read32(GUEST_TR_AR_BYTES);
+-		vmcs_write32(GUEST_TR_AR_BYTES, ar & ~VMX_AR_S_MASK);
+-	}
++	vmcs_write32(CR3_TARGET_COUNT, 0);
++	vmcs_write32(GUEST_TR_AR_BYTES,
++		     vmcs_read32(GUEST_TR_AR_BYTES) & ~VMX_AR_S_MASK);
+ }
+ 
+ /*
+-- 
+2.34.1
+

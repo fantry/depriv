@@ -1,0 +1,68 @@
+From fc91772a0bbbc09d7956952432fd0284d8f76813 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 14 Jun 2020 02:54:48 -0700
+Subject: [PATCH 026/140] let's try saving FS base MSR on VM exit, KVM is not
+ happy.
+
+---
+ arch/x86/kvm/vmx/depriv.c | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 8ce31ff2eaba..36b5cd80eb34 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -635,6 +635,7 @@ static void __init vmx_depriv_cpu_controls(void)
+ 	vmcs_write32(CR3_TARGET_COUNT, 0);
+ 
+ 	vmcs_write32(VM_EXIT_MSR_STORE_COUNT, 0);
++	vmcs_write64(VM_EXIT_MSR_STORE_ADDR, 0);
+ 	vmcs_write32(VM_EXIT_MSR_LOAD_COUNT, 0);
+ 	vmcs_write64(VM_EXIT_MSR_LOAD_ADDR, 0);
+ 	vmcs_write32(VM_ENTRY_MSR_LOAD_COUNT, 0);
+@@ -995,6 +996,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 	struct page *page = NULL;
+ 	void *host_cpu_state = NULL;
+ 	void *msr_bitmap = NULL;
++	struct vmx_msrs *msrs = NULL;
+ 	unsigned long host_rsp, rip, rsp, rflags;
+ 	int vmx_depriv_result;
+ 
+@@ -1034,6 +1036,13 @@ static void __init vmx_depriv_cpu(void *info)
+ 	vmx_depriv_cpu_intercept_msr(MSR_KERNEL_GS_BASE, true);
+ 	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+ 
++	msrs = (struct vmx_msrs *)host_cpu_state;
++	msrs->nr = 1;
++	msrs->val[0].index = MSR_FS_BASE;
++
++	vmcs_write32(VM_EXIT_MSR_STORE_COUNT, msrs->nr);
++	vmcs_write64(VM_EXIT_MSR_STORE_ADDR, __pa(msrs->val));
++
+ 	vmx_depriv_cpu_state();
+ 
+ 	vmcs_writel(HOST_RIP, (unsigned long)vmx_depriv_vmexit);
+@@ -1344,6 +1353,7 @@ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ 	unsigned long *cnt = (unsigned long *)(host_rsp + 0x40);
+ 	int cpu = smp_processor_id();
+ 	unsigned long base, last_base;
++	struct vmx_msrs *msrs = (struct vmx_msrs *)per_cpu(depriv_cpu_state, cpu);
+ 
+ 	base = vmcs_readl(GUEST_FS_BASE);
+ 	last_base = *(unsigned long *)(host_rsp + 0x38);
+@@ -1351,6 +1361,12 @@ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ 		pr_info("depriv: cpu%d (%ld) exit reason %d FS base %#lx <= %#lx\n",
+ 			cpu, *cnt, reason, base, last_base);
+ 
++	if (msrs->val[0].value != base) {
++		pr_info("depriv: cpu%d (%ld) exit reason %d stored FS base %#llx <= %#lx\n",
++			cpu, *cnt, reason, msrs->val[0].value, base);
++		vmcs_writel(GUEST_FS_BASE, msrs->val[0].value);
++	}
++
+ 	base = vmcs_readl(GUEST_GS_BASE);
+ 	last_base = *(unsigned long *)(host_rsp + 0x30);
+ 	if (base != last_base)
+-- 
+2.34.1
+

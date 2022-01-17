@@ -1,0 +1,41 @@
+From d46a86e47b80484145eba27681772c0f1ffe1aec Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 3 Oct 2020 22:21:42 -0700
+Subject: [PATCH 123/140] call vmx_depriv_cpu_segments only when we switch vmcs
+
+---
+ arch/x86/depriv/vmx/depriv.c | 10 ++++------
+ 1 file changed, 4 insertions(+), 6 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 1ff5c9554784..a1ef5da4f07f 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -530,12 +530,10 @@ static bool vmx_depriv(struct task_struct *next)
+ 			vmcs_load(vmcs);
+ 			indirect_branch_prediction_barrier();
+ 			per_cpu(active_loaded_vmcs, cpu) = v;
+-		}
+-
+-		vmx_depriv_cpu_segments();
+ 
+-		// What else should we sync to non-root mode?
+-		vmcs_writel(GUEST_CR3, __read_cr3());
++			vmcs_writel(GUEST_CR3, __read_cr3());
++			vmx_depriv_cpu_segments();
++		}
+ 
+ 		r = __vmx_depriv(false);
+ 	}
+@@ -579,7 +577,7 @@ static void vmx_free_loaded_vmcs(void *info)
+ static void vmx_free_pidns_cb(struct pid_namespace *ns)
+ {
+ 	if (ns)
+-		on_each_cpu(vmx_free_loaded_vmcs, (void *)ns, 1);
++		on_each_cpu(vmx_free_loaded_vmcs, (void *)ns, 0);
+ }
+ 
+ extern struct depriv_ops depriv_ops;
+-- 
+2.34.1
+

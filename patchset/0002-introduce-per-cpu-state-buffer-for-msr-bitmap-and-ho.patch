@@ -1,0 +1,268 @@
+From e0641848839553df656c9e3416fc97f93df099e8 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 9 Jun 2020 17:41:54 -0700
+Subject: [PATCH 002/140] introduce per cpu state buffer for msr bitmap and
+ host stack
+
+---
+ arch/x86/kvm/vmx/vmx.c | 126 +++++++++++++++++++++--------------------
+ 1 file changed, 64 insertions(+), 62 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 3a183623b9bd..36211e7db022 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8043,10 +8043,21 @@ static void vmx_cleanup_l1d_flush(void)
+ }
+ 
+ #if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV_HOST)
++/*
++ * host state memory buffer page order
++ */
++#define DEPRIV_CPU_STATE_PAGE_ORDER		1
++#define DEPRIV_CPU_STATE_BUFFER_SIZE		(PAGE_SIZE << DEPRIV_CPU_STATE_PAGE_ORDER)
++#define DEPRIV_CPU_STATE_VMCS_MSR_BITMAP	(DEPRIV_CPU_STATE_BUFFER_SIZE - PAGE_SIZE)
++
++/*
++ * needed to iret to root mode kernel or user space when the VM exit happened
++ */
++#define DEPRIV_HOST_STACK_RESERVED_BYTES (16 * 8)
++
+ static struct vmcs_config depriv_vmcs_conf;
+ static DEFINE_PER_CPU(struct vmcs *, depriv_vmcs);
+-static DEFINE_PER_CPU(void *, depriv_msr_bitmap);
+-static DEFINE_PER_CPU(void *, depriv_stack_base);
++static DEFINE_PER_CPU(void *, depriv_cpu_state);
+ 
+ static void __init vmx_depriv_cpu_controls(void)
+ {
+@@ -8346,20 +8357,30 @@ static void __init vmx_depriv_cpu_misc(void)
+ 	vmcs_write64(GUEST_IA32_DEBUGCTL, dbg_ctrl);
+ }
+ 
++/*
++ * sync host states to guest states
++ */
++static void __init vmx_depriv_cpu_state(void)
++{
++	vmx_depriv_cpu_controls();
++	vmx_depriv_cpu_crs();
++	vmx_depriv_cpu_desc_tables();
++	vmx_depriv_cpu_sysenter_msrs();
++	vmx_depriv_cpu_misc();
++}
++
+ static void vmx_repriv_cpu_release_resources(void)
+ {
+ 	int cpu = smp_processor_id();
+-	void *host_stack_base = per_cpu(depriv_stack_base, cpu);
++	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+ 	struct vmcs *vmcs = per_cpu(depriv_vmcs, cpu);
+-	unsigned long *msr_bitmap = per_cpu(depriv_msr_bitmap, cpu);
+-	unsigned long rsp;
+ 
+-	asm volatile("mov %%rsp,%0" : "=m"(rsp));
+-	pr_info("depriv: reprivilege cpu %d rsp %#lx\n", cpu, rsp);
++	pr_info("depriv: reprivilege cpu %d releasing resources\n", cpu);
+ 
+-	if (host_stack_base) {
+-		per_cpu(depriv_stack_base, cpu) = NULL;
+-		free_pages((unsigned long)host_stack_base, 0);
++	if (host_cpu_state) {
++		per_cpu(depriv_cpu_state, cpu) = NULL;
++		memset(host_cpu_state, 0, DEPRIV_CPU_STATE_BUFFER_SIZE);
++		free_pages((unsigned long)host_cpu_state, DEPRIV_CPU_STATE_PAGE_ORDER);
+ 	}
+ 
+ 	if (vmcs) {
+@@ -8367,11 +8388,6 @@ static void vmx_repriv_cpu_release_resources(void)
+ 		vmcs_clear(vmcs);
+ 		free_vmcs(vmcs);
+ 	}
+-
+-	if (msr_bitmap) {
+-		per_cpu(depriv_msr_bitmap, cpu) = NULL;
+-		free_pages((unsigned long)msr_bitmap, 0);
+-	}
+ }
+ 
+ void vmx_depriv_vmexit(void);
+@@ -8379,19 +8395,14 @@ int vmx_depriv(void);
+ void vmx_depriv_guest_rip(void);
+ void vmx_depriv_test_vmcall(void);
+ 
+-/*
+- * needed to iret to root mode kernel or user space when the VM exit happened
+- */
+-#define HOST_STACK_RESERVED_BYTES (16 * 8)
+-
+ static void __init vmx_depriv_cpu(void *info)
+ {
+ 	int cpu = smp_processor_id();
+ 	int node = cpu_to_node(cpu);
+ 	struct vmcs *vmcs = NULL;
+ 	struct page *page = NULL;
++	void *host_cpu_state = NULL;
+ 	void *msr_bitmap = NULL;
+-	void *host_stack_base = NULL;
+ 	unsigned long host_rsp, guest_rsp, guest_rflags;
+ 	int vmx_depriv_result;
+ 
+@@ -8400,50 +8411,42 @@ static void __init vmx_depriv_cpu(void *info)
+ 		goto error;
+ 	}
+ 
+-	page = __alloc_pages_node(node, GFP_KERNEL, 0);
+-	if (!page) {
+-		pr_err("depriv: unable to allocate MSR bitmap for cpu %d\n", cpu);
+-		goto error;
+-	}
+-
+-	msr_bitmap  = page_address(page);
+-	// no VM-exits on MSR accesses
+-	memset(msr_bitmap, 0, PAGE_SIZE);
+-	per_cpu(depriv_msr_bitmap, cpu) = msr_bitmap;
+-
+ 	vmcs = alloc_vmcs_cpu(false, cpu, GFP_KERNEL);
+ 	if (!vmcs) {
+ 		pr_err("depriv: unable to allocate VMCS for cpu %d\n", cpu);
+ 		goto error;
+ 	}
++
+ 	vmcs_clear(vmcs);
+ 	vmcs_load(vmcs);
+ 	vmcs_write64(VMCS_LINK_POINTER, ~0ull);
+-	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+ 	indirect_branch_prediction_barrier();
+ 	per_cpu(depriv_vmcs, cpu) = vmcs;
+ 
+-	// one stack page for root mode VM exit handler
+-	page = __alloc_pages_node(node, GFP_KERNEL, 0);
++	// memory for root mode VM exit handler
++	page = __alloc_pages_node(node, GFP_KERNEL, DEPRIV_CPU_STATE_PAGE_ORDER);
+ 	if (!page) {
+-		pr_err("depriv: unable to allocate stack for cpu %d\n", cpu);
++		pr_err("depriv: unable to allocate host state buffer for cpu %d\n", cpu);
+ 		goto error;
+ 	}
+ 
+-	host_stack_base = page_address(page);
+-	memset(host_stack_base, 0, PAGE_SIZE);
+-	per_cpu(depriv_stack_base, cpu) = host_stack_base;
++	host_cpu_state = page_address(page);
++	memset(host_cpu_state, 0, DEPRIV_CPU_STATE_BUFFER_SIZE);
++	per_cpu(depriv_cpu_state, cpu) = host_cpu_state;
+ 
+-	vmx_depriv_cpu_controls();
+-	vmx_depriv_cpu_crs();
+-	vmx_depriv_cpu_desc_tables();
+-	vmx_depriv_cpu_sysenter_msrs();
+-	vmx_depriv_cpu_misc();
++	// last page of host state
++	msr_bitmap = host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
++	__set_bit(MSR_GS_BASE & 0x1fff,
++		  msr_bitmap + 0xc00 / sizeof(unsigned long));
++	__set_bit(MSR_KERNEL_GS_BASE & 0x1fff,
++		  msr_bitmap + 0xc00 / sizeof(unsigned long));
++	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
++
++	vmx_depriv_cpu_state();
+ 
+ 	vmcs_writel(HOST_RIP, (unsigned long)vmx_depriv_vmexit);
+-	// reserve extra HOST_STACK_RESERVED_BYTES bytes for reprivileging host
+-	host_rsp = (unsigned long)host_stack_base + PAGE_SIZE -
+-		   HOST_STACK_RESERVED_BYTES;
++	// reserve extra DEPRIV_HOST_STACK_RESERVED_BYTES bytes for reprivileging host
++	host_rsp = (unsigned long)msr_bitmap - DEPRIV_HOST_STACK_RESERVED_BYTES;
+ 	vmcs_writel(HOST_RSP, host_rsp);
+ 
+ 	/* switching to non-root mode */
+@@ -8452,6 +8455,8 @@ static void __init vmx_depriv_cpu(void *info)
+ 	// reserve extra 8 bytes for RIP pushed to stack when calling vmx_depriv
+ 	guest_rsp -= 8;
+ 	vmcs_writel(GUEST_RSP, guest_rsp);
++
++	// XXX: Xin to check again and elaborate
+ 	*(unsigned long *)host_rsp = guest_rsp;
+ 
+ 	asm volatile("xor %%rax,%%rax\n\t"
+@@ -8524,25 +8529,19 @@ static void vmx_repriv_cpu_crs(void)
+ 		pr_info("depriv: repriv cpu %d cr0 %#lx : %#lx : %#lx\n",
+ 			cpu, host_cr0, vmcs_readl(HOST_CR0), guest_cr0);
+ 		write_cr0(guest_cr0);
+-		//vmcs_writel(HOST_CR0, guest_cr0);
++		vmcs_writel(HOST_CR0, guest_cr0);
+ 	}
+ 
+ 	if (host_cr3 != guest_cr3) {
+ 		pr_info("depriv: repriv cpu %d cr3 %#lx : %#lx\n",
+ 			cpu, host_cr3, guest_cr3);
+-
+-		host_cr3 = boot_cpu_has(X86_FEATURE_PTI) ?
+-			guest_cr3 & ~PTI_USER_PGTABLE_AND_PCID_MASK : guest_cr3;
+-		pr_info("depriv: repriv cpu %d cr3 = %#lx\n", cpu, host_cr3);
+-		vmcs_writel(HOST_CR3, host_cr3);
+-		//write_cr3(host_cr3);
++		vmcs_writel(HOST_CR3, guest_cr3);
+ 	}
+ 
+ 	if (host_cr4 != guest_cr4) {
+ 		pr_info("depriv: repriv cpu %d cr4 %#lx : %#lx : %#lx\n",
+ 			cpu, host_cr4, vmcs_readl(HOST_CR4), guest_cr4);
+-		//__write_cr4(guest_cr4);
+-		//vmcs_writel(HOST_CR4, guest_cr4);
++		vmcs_writel(HOST_CR4, guest_cr4);
+ 	}
+ }
+ 
+@@ -8820,9 +8819,12 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			pr_info("depriv: cpu %d to handle machine check in root mode\n", cpu);
+ 		else if (is_machine_check(exit_intr_info) || is_nmi(exit_intr_info))
+ 			pr_info("depriv: cpu %d to handle NMI in root mode\n", cpu);
+-		else
++		else {
+ 			pr_info("depriv: cpu %d intr info=%#x\n", cpu, exit_intr_info);
++			dump_guest_insn(guest_rip, insn);
++		}
+ 
++		pr_info("depriv: cpu %d hit exception and continue in root mode\n", cpu);
+ 		CONTINUE_IN_ROOT_MODE(0);
+ 		break;
+ 	}
+@@ -8855,12 +8857,12 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		}
+ 		case 1: /*mov from cr*/
+ 			guest_regs[reg] = vmcs_readl(GUEST_CR3);
+-			pr_info("depriv: depriv cpu %d read cr3 %#lx : %#lx\n",
+-				cpu, vmcs_readl(HOST_CR3), guest_regs[reg]);
++			pr_debug("depriv: depriv cpu %d read cr3 %#lx : %#lx\n",
++				 cpu, vmcs_readl(HOST_CR3), guest_regs[reg]);
+ 			break;
+ 		}
+ 
+-		if (true && exit_cnt < 200) {
++		if (true && exit_cnt < 400) {
+ 			pr_info("depriv: cpu %d accessed cr3 and continue in non-root mode\n", cpu);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		} else {
+@@ -8877,7 +8879,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RCX],
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RDX]);
+ 
+-		if (exit_cnt < 300) {
++		if (exit_cnt < 500) {
+ 			pr_debug("depriv: cpu %d executed cpuid and continue in non-root mode\n", cpu);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		} else {
+@@ -9306,7 +9308,7 @@ void vmx_check_guest_state(void)
+ 	CHECK(vmcs_read32(CR3_TARGET_COUNT) == 0);
+ 
+ 	CHECK(!(cpu_based_exec_ctrl & CPU_BASED_USE_IO_BITMAPS));
+-	CHECK(!(cpu_based_exec_ctrl & CPU_BASED_USE_MSR_BITMAPS));
++	CHECK(cpu_based_exec_ctrl & CPU_BASED_USE_MSR_BITMAPS);
+ 	CHECK(!(cpu_based_exec_ctrl & CPU_BASED_TPR_SHADOW));
+ 	CHECK(pin_based_exec_ctrl & PIN_BASED_NMI_EXITING ||
+ 	      !(pin_based_exec_ctrl & PIN_BASED_VIRTUAL_NMIS));
+-- 
+2.34.1
+

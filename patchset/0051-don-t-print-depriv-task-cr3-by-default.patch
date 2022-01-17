@@ -1,0 +1,25 @@
+From 5c60b8c4b8671e09abe6cb2aea265c0582200bc4 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 22:23:35 -0700
+Subject: [PATCH 051/140] don't print depriv task cr3 by default
+
+---
+ arch/x86/kvm/vmx/depriv.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 3dc31f47c346..59594eba29b6 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1672,7 +1672,7 @@ static int depriv_thread_fn(void *unused)
+ 
+ 	up(&depriv_task_start_sema);
+ 
+-	pr_info("depriv: depriv task cr3: %lx\n", depriv_task_cr3_pa);
++	pr_debug("depriv: depriv task cr3: %lx\n", depriv_task_cr3_pa);
+ 
+ 	if (down_interruptible(&depriv_task_end_sema))
+ 		pr_err("depriv: depriv task interrupted\n");
+-- 
+2.34.1
+

@@ -1,0 +1,130 @@
+From 0029b435dea93c4986b0500d370851c00f606538 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Fri, 11 Sep 2020 23:13:50 -0700
+Subject: [PATCH 112/140] fix calling depriv_switch
+
+---
+ arch/x86/depriv/Makefile         | 2 +-
+ arch/x86/depriv/vmx/depriv.c     | 7 +++++--
+ arch/x86/depriv/x86.c            | 1 +
+ arch/x86/entry/Makefile          | 2 +-
+ arch/x86/entry/entry_64.S        | 5 -----
+ arch/x86/include/asm/depriv.h    | 2 +-
+ arch/x86/include/asm/switch_to.h | 3 +++
+ 7 files changed, 12 insertions(+), 10 deletions(-)
+
+diff --git a/arch/x86/depriv/Makefile b/arch/x86/depriv/Makefile
+index 37b723ab0b61..4f9af271be83 100644
+--- a/arch/x86/depriv/Makefile
++++ b/arch/x86/depriv/Makefile
+@@ -12,7 +12,7 @@ DEPRIV := ../../../virt/depriv
+ #depriv-y	+= $(DERPIV)/depriv_main.o
+ #depriv-y	+= x86.o
+ 
+-depriv-intel-y	+= x86.o vmx/depriv.o vmx/depriv_entry.o vmx/depriv_handler.o vmx/depriv_validator.o
++depriv-intel-y	+= vmx/depriv.o vmx/depriv_entry.o vmx/depriv_handler.o vmx/depriv_validator.o
+ 
+ #obj-$(CONFIG_DEPRIV)		+= depriv.o
+ obj-$(CONFIG_DEPRIV_INTEL)	+= depriv-intel.o
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 572642f9bd39..bf1ead29786c 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -1132,8 +1132,8 @@ bool vmx_repriv_cpu_state(void)
+ 	vmx_repriv_cpu_desc_tables();
+ 
+ 	asm volatile("mov %%rsp,%0" : "=m"(rsp));
+-	pr_info("depriv: cpu%d current rsp %#lx CS selector %x in %s\n",
+-		cpu, rsp, vmcs_read16(GUEST_CS_SELECTOR), __FUNCTION__);
++	pr_debug("depriv: cpu%d current rsp %#lx CS selector %x in %s\n",
++		 cpu, rsp, vmcs_read16(GUEST_CS_SELECTOR), __FUNCTION__);
+ 
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(stack);
+ 
+@@ -1328,6 +1328,9 @@ static void __exit vmx_depriv_exit(void)
+ 
+ 	on_each_cpu(vmx_repriv_cpu, NULL, 1);
+ 
++	depriv_ops.enter = NULL;
++	depriv_ops.exit = NULL;
++
+ 	pr_info("depriv: successfully unloaded, cpu vmx operation mask: %*pb[l]\n",
+ 		cpumask_pr_args(&cpu_vmx_operation_mask));
+ 
+diff --git a/arch/x86/depriv/x86.c b/arch/x86/depriv/x86.c
+index a5880f5e931b..9beb08f2c5b2 100644
+--- a/arch/x86/depriv/x86.c
++++ b/arch/x86/depriv/x86.c
+@@ -18,6 +18,7 @@ struct depriv_ops depriv_ops = {
+ 	.enter = NULL,
+ 	.exit = NULL,
+ };
++EXPORT_SYMBOL_GPL(depriv_ops);
+ 
+ /*
+  * WARNING: must be called with interrupt disabled!
+diff --git a/arch/x86/entry/Makefile b/arch/x86/entry/Makefile
+index 7fec5dcf6438..261a39737ec4 100644
+--- a/arch/x86/entry/Makefile
++++ b/arch/x86/entry/Makefile
+@@ -12,7 +12,7 @@ CFLAGS_REMOVE_common.o		= $(CC_FLAGS_FTRACE)
+ CFLAGS_common.o			+= -fno-stack-protector
+ 
+ obj-y				:= entry_$(BITS).o thunk_$(BITS).o syscall_$(BITS).o
+-obj-y				+= common.o
++obj-y				+= common.o ../depriv/x86.o
+ 
+ obj-y				+= vdso/
+ obj-y				+= vsyscall/
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 4b192f841d51..74046a34e447 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -234,11 +234,6 @@ SYM_FUNC_START(__switch_to_asm)
+ 	pushq	%r14
+ 	pushq	%r15
+ 
+-#ifdef CONFIG_DEPRIV
+-	/* %rdi is prev and %rsi is next */
+-	call depriv_switch
+-#endif
+-
+ 	/* switch stack */
+ 	movq	%rsp, TASK_threadsp(%rdi)
+ 	movq	TASK_threadsp(%rsi), %rsp
+diff --git a/arch/x86/include/asm/depriv.h b/arch/x86/include/asm/depriv.h
+index 04d2d64db145..35b7c3091c6f 100644
+--- a/arch/x86/include/asm/depriv.h
++++ b/arch/x86/include/asm/depriv.h
+@@ -8,6 +8,6 @@
+ 
+ DECLARE_PER_CPU(void *, depriv_cpu_state);
+ 
+-extern asmlinkage void asm_depriv_exit(void);
++extern void asm_depriv_exit(void);
+ 
+ #endif /* _ASM_X86_DEPRIV_H */
+diff --git a/arch/x86/include/asm/switch_to.h b/arch/x86/include/asm/switch_to.h
+index b5f0d2ff47e4..c6202fee085b 100644
+--- a/arch/x86/include/asm/switch_to.h
++++ b/arch/x86/include/asm/switch_to.h
+@@ -12,6 +12,8 @@ struct task_struct *__switch_to_asm(struct task_struct *prev,
+ __visible struct task_struct *__switch_to(struct task_struct *prev,
+ 					  struct task_struct *next);
+ 
++void depriv_switch(struct task_struct *prev, struct task_struct *next);
++
+ asmlinkage void ret_from_fork(void);
+ 
+ /*
+@@ -46,6 +48,7 @@ struct fork_frame {
+ 
+ #define switch_to(prev, next, last)					\
+ do {									\
++	depriv_switch((prev), (next));					\
+ 	((last) = __switch_to_asm((prev), (next)));			\
+ } while (0)
+ 
+-- 
+2.34.1
+

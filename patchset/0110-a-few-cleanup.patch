@@ -1,0 +1,106 @@
+From f53532ea702b5558cbf319bef699ed7be305fcbb Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 10 Sep 2020 10:10:43 -0700
+Subject: [PATCH 110/140] a few cleanup
+
+---
+ arch/x86/depriv/vmx/depriv.c       | 34 ++++++++++++++----------------
+ arch/x86/depriv/vmx/depriv_entry.S |  1 -
+ 2 files changed, 16 insertions(+), 19 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 85c73469d798..3ab7f4dd541f 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -1067,7 +1067,7 @@ static void vmx_repriv_cpu(void *info)
+ static void vmx_depriv_debug_with_non_root_mode(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	unsigned long gdt_base = vmcs_readl(HOST_GDTR_BASE), base, rsp;
++	unsigned long gdt_base = vmcs_readl(HOST_GDTR_BASE), base;
+ 	struct desc_struct *dentry;
+ 	u16 seg;
+ 	bool is_segment = true;
+@@ -1088,19 +1088,14 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ 	vmcs_writel(GUEST_CR3, __read_cr3());
+ 	vmcs_writel(GUEST_GS_BASE, vmcs_readl(HOST_GS_BASE));
+ 
+-	vmcs_write32(CR3_TARGET_COUNT, DEPRIV_INVALID_HOST_CR3_TARGET_COUNT);
++	vmcs_write32(CR3_TARGET_COUNT, 0);
+ 	vmcs_write32(GUEST_TR_AR_BYTES,
+ 		     vmcs_read32(GUEST_TR_AR_BYTES) & ~VMX_AR_S_MASK);
+ 
+ 	pr_info("depriv: cpu%d switching to \"root mode\" with rip %#lx rsp %#lx "
+-		"GS base %#lx kernel GS base %#lx\n",
++		"non-root GS base %#lx kernel GS base MSR %#lx (GS base MSR %#lx)\n",
+ 		cpu, vmcs_readl(GUEST_RIP), vmcs_readl(GUEST_RSP),
+-		vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+-	pr_info("depriv: cpu%d switching to \"root mode\" with GS base %#lx kernel GS base %#lx\n",
+-		cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+-
+-	asm volatile("mov %%rsp,%0" : "=m"(rsp));
+-	pr_info("depriv: cpu%d rsp: %#lx in vmx_depriv_debug_with_non_root_mode\n", cpu, rsp);
++		vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE), read_msr(MSR_GS_BASE));
+ }
+ 
+ void vmx_resume_fail(void)
+@@ -1108,15 +1103,15 @@ void vmx_resume_fail(void)
+ 	int cpu = raw_smp_processor_id();
+ 	unsigned long rsp;
+ 
+-	pr_err("depriv: resume failed");
++	pr_err("depriv: cpu%d resume failed\n", cpu);
+ 
+ 	asm volatile("mov %%rsp,%0" : "=m"(rsp));
+-	pr_info("depriv: cpu%d rsp: %#lx\n", cpu, rsp);
++	pr_info("depriv: cpu%d current rsp: %#lx\n", cpu, rsp);
+ 
+-	pr_info("depriv: cpu%d switching to \"root mode\" with GS base %#lx kernel GS base %#lx\n",
+-		cpu, vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+-	pr_info("depriv: cpu%d switching to \"root mode\" with GS base %#lx kernel GS base %#lx\n",
+-		cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
++	pr_info("depriv: cpu%d switching to \"root mode\" with rip %#lx rsp %#lx "
++		"non-root GS base %#lx kernel GS base MSR %#lx (GS base MSR %#lx)\n",
++		cpu, vmcs_readl(GUEST_RIP), vmcs_readl(GUEST_RSP),
++		vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE), read_msr(MSR_GS_BASE));
+ }
+ 
+ /*
+@@ -1153,7 +1148,8 @@ bool vmx_repriv_cpu_state(void)
+ 	vmx_repriv_cpu_desc_tables();
+ 
+ 	asm volatile("mov %%rsp,%0" : "=m"(rsp));
+-	pr_info("depriv: cpu%d rsp: %#lx in vmx_repriv_cpu_state\n", cpu, rsp);
++	pr_info("depriv: cpu%d current rsp %#lx CS selector %x in %s\n",
++		cpu, rsp, vmcs_read16(GUEST_CS_SELECTOR), __FUNCTION__);
+ 
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(stack);
+ 
+@@ -1169,8 +1165,10 @@ bool vmx_repriv_cpu_state(void)
+ 	}
+ 
+ 	if (depriv_exiting) {
+-		pr_info("depriv: cpu%d switching to root mode with GS base %#lx kernel GS base %#lx\n",
+-			cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
++		pr_info("depriv: cpu%d switching to root mode with rip %#lx rsp %#lx "
++			"non-root GS base %#lx kernel GS base MSR %#lx (GS base MSR %#lx)\n",
++			cpu, vmcs_readl(GUEST_RIP), vmcs_readl(GUEST_RSP),
++			vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE), read_msr(MSR_GS_BASE));
+ 		vmx_repriv_cpu_release_resources();
+ 	}
+ 
+diff --git a/arch/x86/depriv/vmx/depriv_entry.S b/arch/x86/depriv/vmx/depriv_entry.S
+index 4a16b6157c75..93dbc0da53af 100644
+--- a/arch/x86/depriv/vmx/depriv_entry.S
++++ b/arch/x86/depriv/vmx/depriv_entry.S
+@@ -79,7 +79,6 @@ SYM_CODE_START(vmx_depriv_switch_to_root_mode)
+ 	je asm_depriv_exit
+ 	vmresume
+ 
+-	call vmx_resume_fail
+ 	/*
+ 	 * VM resume failed, forced to switch to root mode with guest stack
+ 	 */
+-- 
+2.34.1
+

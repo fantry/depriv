@@ -1,0 +1,26 @@
+From e7f17b37c01f836ddd559d7100b5b5c99392d4a0 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 23 Jun 2020 11:58:23 -0700
+Subject: [PATCH 091/140] log invalid host state for testing handling it
+
+---
+ arch/x86/kvm/vmx/depriv.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 19a63881ae03..f9e30a5453aa 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -872,6 +872,9 @@ bool vmx_repriv_cpu_state(void)
+ 	unsigned long iret_stack_base = depriv_iret_stack_base(cpu);
+ 	unsigned long host_rsp = vmcs_readl(HOST_RSP);
+ 
++	if (vmcs_read32(CR3_TARGET_COUNT) != 0)
++		pr_err("depriv: cpu%d invalid host state\n", cpu);
++
+ 	vmx_repriv_cpu_crs();
+ 	vmx_repriv_cpu_misc();
+ 	vmx_repriv_cpu_sysenter_msrs();
+-- 
+2.34.1
+

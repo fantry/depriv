@@ -1,0 +1,324 @@
+From 833716bacef768f40ee16eb1c2a0ae842182f8db Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Mon, 15 Jun 2020 14:40:27 -0700
+Subject: [PATCH 034/140] allocate root mode pgd, which is per-CPU
+
+---
+ arch/x86/kvm/vmx/depriv.c | 133 ++++++++++++++++++++++----------------
+ 1 file changed, 76 insertions(+), 57 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 8cb7b9e27684..ef19492fd9b3 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include <linux/kvm_host.h>
++#include <linux/delay.h>
+ 
+ #include <asm/debugreg.h>
+ #include <asm/insn.h>
+@@ -17,23 +18,22 @@
+ MODULE_AUTHOR("Xin Li");
+ MODULE_LICENSE("GPL");
+ 
+-/*
+- * the following macros are from arch/x86/entry/calling.h
+- */
+-#ifdef CONFIG_PAGE_TABLE_ISOLATION
+-#define PTI_USER_PGTABLE_BIT		PAGE_SHIFT
+-#define PTI_USER_PGTABLE_MASK		(1 << PTI_USER_PGTABLE_BIT)
+-#define PTI_USER_PCID_BIT		X86_CR3_PTI_PCID_USER_BIT
+-#define PTI_USER_PCID_MASK		(1 << PTI_USER_PCID_BIT)
+-#define PTI_USER_PGTABLE_AND_PCID_MASK  (PTI_USER_PCID_MASK | PTI_USER_PGTABLE_MASK)
+-#endif
++static bool __read_mostly test_handle_vmlaunch_failure = 0;
++module_param(test_handle_vmlaunch_failure, bool, S_IRUGO);
++
++static bool __read_mostly test_handle_invalid_guest_state = 0;
++module_param(test_handle_invalid_guest_state, bool, S_IRUGO);
++
++static unsigned int __read_mostly depriv_print_mod = 10000;
++module_param(depriv_print_mod, uint, 0444);
+ 
+ /*
+  * host state memory buffer page order
+  */
+-#define DEPRIV_CPU_STATE_PAGE_ORDER		1
++#define DEPRIV_CPU_STATE_PAGE_ORDER		2
+ #define DEPRIV_CPU_STATE_BUFFER_SIZE		(PAGE_SIZE << DEPRIV_CPU_STATE_PAGE_ORDER)
+-#define DEPRIV_CPU_STATE_VMCS_MSR_BITMAP	(DEPRIV_CPU_STATE_BUFFER_SIZE - PAGE_SIZE)
++#define DEPRIV_CPU_STATE_ROOT_PGD		(DEPRIV_CPU_STATE_BUFFER_SIZE - PAGE_SIZE * 2)
++#define DEPRIV_CPU_STATE_VMCS_MSR_BITMAP	(DEPRIV_CPU_STATE_ROOT_PGD - PAGE_SIZE)
+ 
+ /*
+  * needed to iret to root mode kernel or user space when the VM exit happened
+@@ -53,6 +53,11 @@ MODULE_LICENSE("GPL");
+ #define DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE	(9 * 8)
+ 
+ static struct vmcs_config depriv_vmcs_conf;
++static struct task_struct *depriv_task;
++static unsigned long depriv_task_cr3_pa;
++static volatile bool depriv_task_started;
++static volatile unsigned int depriv_cpu_count;
++
+ static DEFINE_PER_CPU(struct vmcs *, depriv_vmcs);
+ static DEFINE_PER_CPU(void *, depriv_cpu_state);
+ 
+@@ -569,9 +574,9 @@ static int __init setup_depriv_vmcs_config(void)
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_LOAD_EXITING) {
+ 		// if EPT is available, it's OK to disable this control
+-		//_cpu_based_exec_control &= ~CPU_BASED_CR3_LOAD_EXITING;
+-		//pr_info("depriv: disabled cr3 load exiting\n");
+-		pr_info("depriv: keep cr3 load exiting\n");
++		_cpu_based_exec_control &= ~CPU_BASED_CR3_LOAD_EXITING;
++		pr_info("depriv: disabled cr3 load exiting\n");
++		//pr_info("depriv: keep cr3 load exiting\n");
+ 	}
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_STORE_EXITING) {
+@@ -669,7 +674,7 @@ static void __init vmx_depriv_cpu_controls(void)
+ 
+ static void __init vmx_depriv_cpu_crs(void)
+ {
+-	unsigned long cr0, cr3, cr4;
++	unsigned long cr0, cr4;
+ 	u64 pat, efer;
+ 
+ 	cr0 = read_cr0();
+@@ -677,9 +682,7 @@ static void __init vmx_depriv_cpu_crs(void)
+ 	vmcs_writel(CR0_READ_SHADOW, cr0);
+ 	vmcs_writel(GUEST_CR0, cr0);
+ 
+-	cr3 = __read_cr3();
+-	vmcs_writel(HOST_CR3, cr3);
+-	vmcs_writel(GUEST_CR3, cr3);
++	vmcs_writel(GUEST_CR3, __read_cr3());
+ 
+ 	cr4 = __read_cr4();
+ 	vmcs_writel(HOST_CR4, cr4);
+@@ -697,13 +700,6 @@ static void __init vmx_depriv_cpu_crs(void)
+ 	vmcs_write64(HOST_IA32_EFER, efer);
+ 	vmcs_write64(GUEST_IA32_EFER, efer);
+ 
+-	if (efer & EFER_LMA && efer & EFER_SCE) {
+-		pr_debug("STAR=%016lx", read_msr(MSR_STAR));
+-		pr_debug("LSTAR=%016lx", read_msr(MSR_LSTAR));
+-		pr_debug("CSTAR=%016lx", read_msr(MSR_CSTAR));
+-		pr_debug("syscall mask=%016lx", read_msr(MSR_SYSCALL_MASK));
+-	}
+-
+ 	if (cpu_has_load_perf_global_ctrl()) {
+ 		u64 perf_global_ctrl;
+ 		rdmsrl_safe(MSR_CORE_PERF_GLOBAL_CTRL, &perf_global_ctrl);
+@@ -939,6 +935,9 @@ static void __init vmx_depriv_cpu_state(void)
+ 	vmx_depriv_cpu_misc();
+ }
+ 
++/*
++ * this function must be executed in root mode.
++ */
+ static void vmx_repriv_cpu_release_resources(void)
+ {
+ 	int cpu = smp_processor_id();
+@@ -958,6 +957,8 @@ static void vmx_repriv_cpu_release_resources(void)
+ 		vmcs_clear(vmcs);
+ 		free_vmcs(vmcs);
+ 	}
++
++	--depriv_cpu_count;
+ }
+ 
+ void vmx_depriv_vmexit(void);
+@@ -1049,6 +1050,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 	struct vmcs *vmcs = NULL;
+ 	struct page *page = NULL;
+ 	void *host_cpu_state = NULL;
++	void *host_cr3_va = NULL;
+ 	void *msr_bitmap = NULL;
+ 	unsigned long host_rsp, rip, rsp, rflags;
+ 	int vmx_depriv_result;
+@@ -1081,7 +1083,12 @@ static void __init vmx_depriv_cpu(void *info)
+ 	memset(host_cpu_state, 0, DEPRIV_CPU_STATE_BUFFER_SIZE);
+ 	per_cpu(depriv_cpu_state, cpu) = host_cpu_state;
+ 
+-	// last page of host state
++	// last 2 pages of host state
++	host_cr3_va = host_cpu_state + DEPRIV_CPU_STATE_ROOT_PGD;
++	memcpy(host_cr3_va, __va(depriv_task_cr3_pa), PAGE_SIZE);
++	vmcs_writel(HOST_CR3, __pa(host_cr3_va));
++
++	// the 2nd page of host state
+ 	msr_bitmap = host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
+ 	memset(msr_bitmap, 0, PAGE_SIZE);
+ 	//vmx_depriv_cpu_intercept_msr(MSR_FS_BASE, true);
+@@ -1118,10 +1125,10 @@ static void __init vmx_depriv_cpu(void *info)
+ 	pr_info("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n",
+ 		cpu, rip, rsp);
+ 
+-	if (false) // true: test code path handling vmlaunch failure
++	if (test_handle_vmlaunch_failure)
+ 		vmcs_write32(CR3_TARGET_COUNT, 0x100000);
+ 
+-	if (false) // true: test code path handling vmexit on VM launch failure
++	if (test_handle_invalid_guest_state)
+ 		vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
+ 
+ 	/*
+@@ -1143,6 +1150,8 @@ static void __init vmx_depriv_cpu(void *info)
+ 		pr_info("depriv: cpu%d deprivileged: rsp=%#lx  rflags=%#lx\n",
+ 			cpu, rsp, rflags);
+ 
++		++depriv_cpu_count;
++
+ 		*to_root_mode = false;
+ 		fs_base = read_msr(MSR_FS_BASE);
+ 
+@@ -1171,10 +1180,8 @@ static void vmx_repriv_cpu_crs(void)
+ {
+ 	int cpu = smp_processor_id();
+ 	unsigned long host_cr0 = read_cr0();
+-	unsigned long host_cr3 = __read_cr3();
+ 	unsigned long host_cr4 = __read_cr4();
+ 	unsigned long cr0 = vmcs_readl(GUEST_CR0);
+-	unsigned long cr3 = vmcs_readl(GUEST_CR3);
+ 	unsigned long cr4 = vmcs_readl(GUEST_CR4);
+ 
+ 	if (host_cr0 != cr0) {
+@@ -1184,11 +1191,6 @@ static void vmx_repriv_cpu_crs(void)
+ 		vmcs_writel(HOST_CR0, cr0);
+ 	}
+ 
+-	if (host_cr3 != cr3) {
+-		pr_info("depriv: repriv cpu%d cr3 %#lx : %#lx\n",
+-			cpu, host_cr3, cr3);
+-	}
+-
+ 	if (host_cr4 != cr4) {
+ 		pr_info("depriv: repriv cpu%d cr4 %#lx : %#lx : %#lx\n",
+ 			cpu, host_cr4, vmcs_readl(HOST_CR4), cr4);
+@@ -1340,6 +1342,12 @@ static void vmx_repriv_cpu(void *info)
+ void vmx_repriv_host(void)
+ {
+ 	on_each_cpu(vmx_repriv_cpu, NULL, 0);
++
++	while (depriv_cpu_count) {
++		ssleep(1);
++	}
++
++	kthread_stop(depriv_task);
+ 	pr_info("depriv: reprivileged host\n");
+ }
+ 
+@@ -1430,9 +1438,6 @@ static void vmx_depriv_cpu_sync_fsgs_base(unsigned long host_rsp, u32 reason)
+ 	}
+ }
+ 
+-/*
+- * the following fs base sync logic is confusing, but it happens on nested
+- */
+ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ {
+ 	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
+@@ -1486,7 +1491,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 	}
+ 
+-	if (!(*cnt % 100000))
++	if (!(*cnt % depriv_print_mod))
+ 		pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx\n",
+ 			cpu, *cnt, reason, rip, rsp);
+ 
+@@ -1564,26 +1569,19 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ 		switch ((qualification >> 4) & 3) {
+ 		case 0: { /* mov to cr */
+-			unsigned long cr3 = regs[reg], host_cr3;
++			unsigned long cr3 = regs[reg];
+ 			unsigned long cr4 = vmcs_readl(GUEST_CR4);
+ 
+-			if (!(cr4 & X86_CR4_PCIDE)) {
+-				pr_debug("depriv: cpu%d (%ld) PCID disabled, fixing cr3\n", cpu, *cnt);
+-				cr3 &= ~X86_CR3_PCID_NOFLUSH;
+-			} else {
++			if (!(cr4 & X86_CR4_PCIDE))
++				pr_debug("depriv: cpu%d (%ld) PCID disabled\n", cpu, *cnt);
++			else
+ 				pr_debug("depriv: cpu%d (%ld) PCID enabled\n", cpu, *cnt);
+-				cr3 &= ~X86_CR3_PCID_NOFLUSH;
+-			}
+ 
++			cr3 &= ~X86_CR3_PCID_NOFLUSH;
+ 			vmcs_writel(GUEST_CR3, cr3);
+ 
+-			if (boot_cpu_has(X86_FEATURE_PTI))
+-				host_cr3 = cr3 & ~PTI_USER_PGTABLE_AND_PCID_MASK;
+-
+-			vmcs_writel(HOST_CR3, host_cr3);
+-
+-			pr_debug("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx) host cr3: %#lx\n",
+-				 cpu, *cnt, cr, cr3, regs[reg], host_cr3);
++			pr_debug("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx)\n",
++				 cpu, *cnt, cr, cr3, regs[reg]);
+ 			break;
+ 		}
+ 		case 1: /*mov from cr*/
+@@ -1605,7 +1603,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	}
+ 
+ 	case EXIT_REASON_CPUID: {
+-		if (!(*cnt % 100000))
++		if (!(*cnt % depriv_print_mod))
+ 			pr_info("depriv: cpu%d (%ld) cpuid[%#x]\n", cpu, *cnt, (u32)regs[VCPU_REGS_RAX]);
+ 
+ 		native_cpuid((unsigned int *)&regs[VCPU_REGS_RAX],
+@@ -1629,8 +1627,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 				cpu, *cnt, rip);
+ 			DEPRIV_CONTINUE_IN_ROOT_MODE(insn_len);
+ 		} else {
+-			pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, continue in non-root mode\n",
+-				cpu, *cnt, rip);
++			pr_debug("depriv: cpu%d (%ld) vmcall @ %#lx, continue in non-root mode\n",
++				 cpu, *cnt, rip);
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+ 	}
+@@ -1744,6 +1742,20 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	}
+ }
+ 
++static int depriv_thread_fn(void *unused)
++{
++	depriv_task_cr3_pa = read_cr3_pa();
++	pr_info("depriv: task cr3: %lx\n", depriv_task_cr3_pa);
++
++	depriv_task_started = true;
++
++	while (!kthread_should_stop()) {
++		ssleep(1);
++	}
++
++	return 1;
++}
++
+ void __init vmx_depriv_host(void)
+ {
+ 	if (setup_depriv_vmcs_config()) {
+@@ -1751,5 +1763,12 @@ void __init vmx_depriv_host(void)
+ 		return;
+ 	}
+ 
++	depriv_task = kthread_run(depriv_thread_fn, NULL, "depriv_task");
++
++	if (!depriv_task_started) {
++		pr_info("depriv: wait for depriv task to start\n");
++		ssleep(1);
++	}
++
+ 	on_each_cpu(vmx_depriv_cpu, NULL, 0);
+ }
+-- 
+2.34.1
+

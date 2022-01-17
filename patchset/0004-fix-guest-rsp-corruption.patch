@@ -1,0 +1,700 @@
+From dff355765b6d21aeca3701c6963a171135b9bf8a Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 10 Jun 2020 12:12:44 -0700
+Subject: [PATCH 004/140] fix guest rsp corruption
+
+---
+ arch/x86/entry/entry_64.S |  19 +-
+ arch/x86/kvm/vmx/vmx.c    | 353 +++++++++++++++++++++-----------------
+ 2 files changed, 212 insertions(+), 160 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 84c41092e84b..a56f45f1d3e7 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1416,8 +1416,25 @@ SYM_CODE_END(asm_exc_nmi)
+ 
+ SYM_CODE_START(vmx_depriv_continue_in_root_mode)
+ 	push	%rax
+-	mov	0x30(%rsp), %rax
++	push	%rcx
++	push	%rdx
++
++	/*
++	 * switch to guest CR3
++	 */
++	mov	0x40(%rsp), %rax
+ 	mov	%rax, %cr3
++
++	/*
++	 * set to guest GS base
++	 */
++	movl	$MSR_GS_BASE, %ecx
++	movl	0x48(%rsp), %eax
++	movl	0x4c(%rsp), %edx
++	wrmsr
++
++	pop	%rdx
++	pop	%rcx
+ 	pop	%rax
+ 	iretq
+ SYM_CODE_END(vmx_depriv_continue_in_root_mode)
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index d06a40a3de46..698efe2187cd 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8079,9 +8079,7 @@ static void __init vmx_depriv_cpu_controls(void)
+ 	vmcs_write32(VM_ENTRY_CONTROLS,
+ 		     depriv_vmcs_conf.vmentry_ctrl);
+ 
+-	eb = (1u << DB_VECTOR) | (1u << UD_VECTOR) |
+-	     (1u << DF_VECTOR) |
+-	     (1u << AC_VECTOR) | (1u << MC_VECTOR);
++	eb = (1u << UD_VECTOR) | (1u << DF_VECTOR) | (1u << GP_VECTOR);
+ 	vmcs_write32(EXCEPTION_BITMAP, eb);
+ 	vmcs_write32(PAGE_FAULT_ERROR_CODE_MASK, 0);
+ 	vmcs_write32(PAGE_FAULT_ERROR_CODE_MATCH, 0);
+@@ -8165,16 +8163,16 @@ static inline void __init dump_desc_entry(struct desc_struct *dentry)
+ 	unsigned long base = get_desc_base(dentry);
+ 
+ 	if (is_16byte) {
+-		pr_info("depriv: cpu %d %04x %04x %04x %04x %04x %04x %04x %04x\n",
++		pr_info("depriv: cpu%d %04x %04x %04x %04x %04x %04x %04x %04x\n",
+ 			cpu, entry[0], entry[1], entry[2], entry[3],
+ 			entry[4], entry[5], entry[6], entry[7]);
+ 		base += (u64)(*((u32 *)(dentry + 1))) << 32;
+ 	} else {
+-		pr_info("depriv: cpu %d %04x %04x %04x %04x\n",
++		pr_info("depriv: cpu%d %04x %04x %04x %04x\n",
+ 			cpu, entry[0], entry[1], entry[2], entry[3]);
+ 	}
+ 
+-	pr_info("depriv: cpu %d type %x, S %x, DPL %x, P %x, AVL %x, "
++	pr_info("depriv: cpu%d type %x, S %x, DPL %x, P %x, AVL %x, "
+ 		"L %x, D %x, G %x, limit %#x, base %#lx\n",
+ 		cpu, dentry->type, dentry->s, dentry->dpl, dentry->p,
+ 		dentry->avl, dentry->l, dentry->d, dentry->g, limit, base);
+@@ -8207,12 +8205,12 @@ static inline u32 __init get_desc_ar(struct desc_struct *dentry,
+ 		 dentry->d << 14 |
+ 		 dentry->g << 15 |
+ 		 unusable << 16;
+-	pr_debug("depriv: cpu %d entry ar %#x\n", cpu, ar);
++	pr_debug("depriv: cpu%d entry ar %#x\n", cpu, ar);
+ 	return ar;
+ }
+ 
+ #define DEPRIV_SELECTOR(name, sel) {						\
+-	pr_debug("depriv: cpu %d " #name " %#x\n", cpu, sel);			\
++	pr_debug("depriv: cpu%d " #name " %#x\n", cpu, sel);			\
+ 	dentry = get_gdt_entry(gdt_base + sel);					\
+ 	base = get_desc_base(dentry);						\
+ 	if (is_desc_16byte(dentry))						\
+@@ -8247,12 +8245,12 @@ static void __init vmx_depriv_cpu_segments(unsigned long gdt_base)
+ 	DEPRIV_SEGMENT(GS, false);
+ 
+ 	base = read_msr(MSR_FS_BASE);
+-	pr_info("depriv: cpu %d FS base MSR %#lx\n", cpu, base);
++	pr_info("depriv: cpu%d FS base MSR %#lx\n", cpu, base);
+ 	vmcs_writel(HOST_FS_BASE, base);
+ 	vmcs_writel(GUEST_FS_BASE, base);
+ 
+ 	base = read_msr(MSR_GS_BASE);
+-	pr_info("depriv: cpu %d GS base MSR %#lx\n", cpu, base);
++	pr_info("depriv: cpu%d GS base MSR %#lx\n", cpu, base);
+ 	vmcs_writel(HOST_GS_BASE, base);
+ 	vmcs_writel(GUEST_GS_BASE, base);
+ }
+@@ -8280,14 +8278,14 @@ static void __init vmx_depriv_cpu_tr(unsigned long gdt_base)
+ 
+ 	store_tr(tr);
+ 	if (tr != GDT_ENTRY_TSS*8)
+-		pr_err("depriv: cpu %d tr selector mismatch %#x : %#x\n",
++		pr_err("depriv: cpu%d tr selector mismatch %#x : %#x\n",
+ 		       cpu, tr, GDT_ENTRY_TSS*8);
+ 	vmcs_write16(HOST_TR_SELECTOR, tr);
+ 	DEPRIV_SELECTOR(TR, tr);
+ 	vmcs_writel(HOST_TR_BASE, base);
+ 	tss_base = (unsigned long)&get_cpu_entry_area(cpu)->tss.x86_tss;
+ 	if (base != tss_base)
+-		pr_err("depriv: cpu %d tr base mismatch %#lx : %#lx\n",
++		pr_err("depriv: cpu%d tr base mismatch %#lx : %#lx\n",
+ 		       cpu, base, tss_base);
+ 
+ 	ar = vmcs_read32(GUEST_TR_AR_BYTES);
+@@ -8308,7 +8306,7 @@ static void __init vmx_depriv_cpu_desc_tables(void)
+ 	store_gdt(&gdt);
+ 	gdt_base = gdt.address;
+ 	if (gdt_base != (unsigned long)get_current_gdt_ro())
+-		pr_err("depriv: cpu %d gdt base mismatch %#lx : %#lx\n",
++		pr_err("depriv: cpu%d gdt base mismatch %#lx : %#lx\n",
+ 		       cpu, gdt_base, (unsigned long)get_current_gdt_ro());
+ 	vmcs_writel(HOST_GDTR_BASE, gdt_base);
+ 	vmcs_writel(GUEST_GDTR_BASE, gdt_base);
+@@ -8436,6 +8434,8 @@ static void __init vmx_depriv_cpu(void *info)
+ 
+ 	// last page of host state
+ 	msr_bitmap = host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
++	__set_bit(MSR_FS_BASE & 0x1fff,
++		  msr_bitmap + 0xc00 / sizeof(unsigned long));
+ 	__set_bit(MSR_GS_BASE & 0x1fff,
+ 		  msr_bitmap + 0xc00 / sizeof(unsigned long));
+ 	__set_bit(MSR_KERNEL_GS_BASE & 0x1fff,
+@@ -8485,7 +8485,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 			     "pop %%rax\n\t"
+ 			     "mov %%rax,%0"
+ 			     : "=m"(guest_rflags) :: "%rax");
+-		pr_info("depriv: cpu %d deprivileged: rsp=%#lx  rflags=%#lx\n",
++		pr_info("depriv: cpu%d deprivileged: rsp=%#lx  rflags=%#lx\n",
+ 			cpu, guest_rsp, guest_rflags);
+ 
+ 		vmx_depriv_test_vmcall();
+@@ -8535,7 +8535,6 @@ static void vmx_repriv_cpu_crs(void)
+ 	if (host_cr3 != guest_cr3) {
+ 		pr_info("depriv: repriv cpu %d cr3 %#lx : %#lx\n",
+ 			cpu, host_cr3, guest_cr3);
+-		vmcs_writel(HOST_CR3, guest_cr3);
+ 	}
+ 
+ 	if (host_cr4 != guest_cr4) {
+@@ -8558,73 +8557,55 @@ static inline void vmx_repriv_cpu_misc(void)
+ 	wrmsrl(MSR_IA32_DEBUGCTLMSR, vmcs_read64(GUEST_IA32_DEBUGCTL));
+ }
+ 
+-static void dump_fs(void)
+-{
+-	int cpu = smp_processor_id();
+-
+-	pr_info("depriv: cpu %d host FS base=%#lx\n",
+-		cpu, read_msr(MSR_FS_BASE));
+-	pr_info("depriv: cpu %d guest FS sel=0x%04x, attr=0x%05x, "
+-		"limit=0x%08x, base=0x%016lx\n",
+-		cpu, vmcs_read16(GUEST_FS_SELECTOR),
+-		vmcs_read32(GUEST_FS_AR_BYTES),
+-		vmcs_read32(GUEST_FS_LIMIT),
+-		vmcs_readl(GUEST_FS_BASE));
+-}
+-
+-#define depriv_loadsegment	loadsegment
+-
+ #define REPRIV_SEGMENT(tag, TAG) do {						\
+-	u32 ar = vmcs_read32(GUEST_##TAG##S_AR_BYTES);				\
++	ar = vmcs_read32(GUEST_##TAG##S_AR_BYTES);				\
+ 	if ((ar >> 16) & 0x1) {							\
+-		pr_info("depriv: cpu %d " #TAG "S unusable\n", cpu);		\
++		pr_info("depriv: cpu%d " #TAG "S unusable\n", cpu);		\
+ 		break;								\
+ 	}									\
+ 	sel = vmcs_read16(GUEST_##TAG##S_SELECTOR);				\
+-	depriv_loadsegment(tag##s, sel);					\
+-	pr_debug("depriv: cpu %d " #TAG "S %#x\n", cpu, sel);			\
+-} while (0)
+-
+-#define REPRIV_FSGS_BASE(TAG) do {						\
+-	host_base = read_msr(MSR_##TAG##S_BASE);				\
+-	guest_base = vmcs_readl(GUEST_##TAG##S_BASE);				\
+-	pr_debug("depriv: cpu %d " #TAG "S base %#lx : %#lx\n",			\
+-		 cpu, host_base, guest_base);					\
+-	if (host_base != guest_base) {						\
+-		pr_info("depriv: cpu %d " #TAG "S base mismatch %#lx : %#lx\n",	\
+-			cpu, host_base, guest_base);				\
+-		vmcs_writel(HOST_##TAG##S_BASE, guest_base);			\
+-		wrmsrl(MSR_##TAG##S_BASE, guest_base);				\
+-	}									\
++	loadsegment(tag##s, sel);						\
++	pr_debug("depriv: cpu%d " #TAG "S %#x\n", cpu, sel);			\
+ } while (0)
+ 
+ static inline void vmx_repriv_cpu_segments(void)
+ {
+ 	int cpu = smp_processor_id();
+-	u16 sel;
+ 	unsigned long host_base, guest_base;
+-
+-	dump_fs();
++	u32 ar;
++	u16 sel;
+ 
+ 	REPRIV_SEGMENT(d, D);
+ 	REPRIV_SEGMENT(e, E);
+-	REPRIV_SEGMENT(f, F);
+ 
+-#undef depriv_loadsegment
+-#define depriv_loadsegment(gs, sel)	load_gs_index(sel)
+-	REPRIV_SEGMENT(g, G);
+-#undef depriv_loadsegment
++	ar = vmcs_read32(GUEST_FS_AR_BYTES);
++	if ((ar >> 16) & 0x1) {
++		pr_info("depriv: cpu%d FS unusable\n", cpu);
++	} else {
++		sel = vmcs_read16(GUEST_FS_SELECTOR);
++		loadsegment(fs, sel);
++		pr_info("depriv: cpu%d FS = %#x\n", cpu, sel);
++	}
+ 
+-	REPRIV_FSGS_BASE(F);
+-	REPRIV_FSGS_BASE(G);
++	host_base = read_msr(MSR_FS_BASE);
++	guest_base = vmcs_readl(GUEST_FS_BASE);
++	pr_info("depriv: cpu%d FS base %#lx : %#lx\n",
++		cpu, host_base, guest_base);
+ 
+-	/*
+-	 * XXX: FS handling is complicated
+-	 *
+-	 * make sure you understand load_seg_legacy() in arch/x86/kernel/process_64.c
+-	 * before making any change here.
+-	 */
+-	dump_fs();
++	// never change GS BASE, which points to kernel mode per-CPU data
++	ar = vmcs_read32(GUEST_GS_AR_BYTES);
++	if ((ar >> 16) & 0x1) {
++		pr_info("depriv: cpu%d GS unusable\n", cpu);
++	} else {
++		sel = vmcs_read16(GUEST_FS_SELECTOR);
++		load_gs_index(sel);
++		pr_info("depriv: cpu%d FS %#x\n", cpu, sel);
++	}
++
++	host_base = read_msr(MSR_GS_BASE);
++	guest_base = vmcs_readl(GUEST_GS_BASE);
++	pr_info("depriv: cpu%d GS base %#lx : %#lx\n",
++		cpu, host_base, guest_base);
+ }
+ 
+ static inline void vmx_repriv_cpu_ldtr(void)
+@@ -8634,7 +8615,7 @@ static inline void vmx_repriv_cpu_ldtr(void)
+ 
+ 	store_ldt(host_ldtr);
+ 	if (host_ldtr != guest_ldtr) {
+-		pr_info("depriv: cpu %d LDTR mismatch %#x : %#x\n",
++		pr_info("depriv: cpu%d LDTR mismatch %#x : %#x\n",
+ 			cpu, host_ldtr, guest_ldtr);
+ 		load_ldt(guest_ldtr);
+ 	}
+@@ -8647,7 +8628,7 @@ static inline void vmx_repriv_cpu_tr(void)
+ 
+ 	store_tr(host_tr);
+ 	if (host_tr != guest_tr) {
+-		pr_info("depriv: cpu %d TR mismatch %#x : %#x\n",
++		pr_info("depriv: cpu%d TR mismatch %#x : %#x\n",
+ 			cpu, host_tr, guest_tr);
+ 		if (guest_tr == 0)
+ 			return;
+@@ -8660,12 +8641,12 @@ static inline void vmx_repriv_cpu_tr(void)
+ 	store_##tag##dt(&host_dt);						\
+ 	guest_dt_base = vmcs_readl(GUEST_##TAG##DTR_BASE);			\
+ 	if (host_dt.address != guest_dt_base)					\
+-		pr_err("depriv: cpu %d " #tag "dt base mismatch %#lx : %#lx\n",	\
++		pr_err("depriv: cpu%d " #tag "dt base mismatch %#lx : %#lx\n",	\
+ 		       cpu, host_dt.address, guest_dt_base);			\
+ 	vmcs_writel(HOST_##TAG##DTR_BASE, guest_dt_base);			\
+ 	guest_dt_limit = vmcs_read32(GUEST_##TAG##DTR_LIMIT);			\
+ 	if (host_dt.size != guest_dt_limit) {					\
+-		pr_debug("depriv: cpu %d " #tag "dt limit mismatch %#x : %#x\n",\
++		pr_debug("depriv: cpu%d " #tag "dt limit mismatch %#x : %#x\n",\
+ 			 cpu, host_dt.size , guest_dt_limit);			\
+ 		host_dt.size = guest_dt_limit;					\
+ 		load_##tag##dt(&host_dt);					\
+@@ -8692,9 +8673,9 @@ static void vmx_repriv_cpu(void *info)
+ 	/* trigger a vmcall vmexit to reprivilege */
+ #if 0
+ 	asm volatile("push %%rbp; vmcall; pop %%rbp" : : :
+-		     "rax", "rbx", "rcx", "rdx",
+-		     "rsi", "rdi", "r8", "r9", "r10", "r11", "r12",
+-		     "r13", "r14", "r15");
++		     "rax", "rcx", "rdx", "rbx",
++		     "rsi", "rdi", "r8", "r9", "r10",
++		     "r11", "r12", "r13", "r14", "r15");
+ #endif
+ 
+ 	vmx_repriv_cpu_release_resources();
+@@ -8718,8 +8699,8 @@ static void vmx_repriv_cpu_state(void)
+ }
+ 
+ #define CONTINUE_IN_NON_ROOT_MODE do {						\
+-	exit_insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);			\
+-	vmcs_writel(GUEST_RIP, guest_rip + exit_insn_len);			\
++	insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);			\
++	vmcs_writel(GUEST_RIP, guest_rip + insn_len);				\
+ 	return true;								\
+ } while (0)
+ 
+@@ -8735,9 +8716,9 @@ static void vmx_repriv_cpu_state(void)
+ 	*(unsigned long *)host_rsp = guest_rsp;					\
+ 	vmx_repriv_cpu_state();							\
+ 	dump_vmcs();								\
+-	pr_info("depriv: cpu %d exit reason %d skip %d bytes instruction "	\
++	pr_info("depriv: cpu%d exit reason %d skip %d bytes instruction "	\
+ 		"and continue in root mode\n",					\
+-		cpu, exit_reason, _rip_offset);					\
++		cpu, reason, _rip_offset);					\
+ 	return false;								\
+ } while (0)
+ 
+@@ -8749,155 +8730,193 @@ static void vmx_repriv_cpu_state(void)
+ 	*(unsigned long *)(host_rsp + 0x20) = vmcs_read16(GUEST_SS_SELECTOR);	\
+ 	vmx_repriv_cpu_state();							\
+ 	dump_vmcs();								\
+-	*(unsigned long *)(host_rsp + 0x28) = vmcs_readl(HOST_CR3);		\
+-	pr_info("depriv: cpu %d exit reason %d skip %d bytes instruction "	\
++	*(unsigned long *)(host_rsp + 0x28) = vmcs_readl(GUEST_CR3);		\
++	*(unsigned long *)(host_rsp + 0x30) = vmcs_readl(GUEST_GS_BASE);	\
++	pr_info("depriv: cpu%d exit reason %d skip %d bytes instruction "	\
+ 		"and continue in root mode\n",					\
+-		cpu, exit_reason, insn_len);					\
++		cpu, reason, insn_len);						\
+ 	return false;								\
+ } while (0)
+ 
++#define DEPRIV_DUMP_GPRS do {							\
++	int i;									\
++	pr_info("depriv: cpu%d guest GPRs:\n", cpu);				\
++	for (i = __VCPU_REGS_RAX; i <= __VCPU_REGS_R15; i += 4) {		\
++		unsigned long *r = &guest_regs[i];				\
++		pr_info("\tcpu%d\t%016lx %016lx %016lx %016lx\n",		\
++			cpu, *r, *(r + 1), *(r + 2), *(r + 3));			\
++	}									\
++} while (0)
++
+ void vmx_depriv_special_insn(void);
+ void vmx_depriv_execute_special_insn_in_root_mode(unsigned long *guest_regs);
+ 
+-static void dump_guest_insn(unsigned long guest_rip, char *insn)
++static void dump_guest_insn(unsigned long guest_rip, int insn_len, char *insn)
+ {
+-	int cpu = smp_processor_id(), i;
++	int i;
+ 
+-	for (i = 0; i < vmcs_read32(VM_EXIT_INSTRUCTION_LEN); i++)
++	if (insn_len == 0)
++		insn_len = MAX_INSN_SIZE;
++
++	for (i = 0; i < insn_len; i++)
+ 		sprintf(insn + 3 * i, " %02x", *(u8 *)(guest_rip + i));
+ 	insn[3 * i] = '\0';
+-
+-	pr_info("depriv: cpu %d guest rip %#lx: %s\n", cpu, guest_rip, insn);
+ }
+ 
+ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ {
+-	int cpu = smp_processor_id(), i;
+-	u32 exit_reason = vmcs_read32(VM_EXIT_REASON);
++	int cpu = smp_processor_id();
++	u32 reason = vmcs_read32(VM_EXIT_REASON);
+ 	unsigned long host_rsp = vmcs_readl(HOST_RSP);
+ 	unsigned long guest_rip = vmcs_readl(GUEST_RIP);
+ 	unsigned long guest_rsp = vmcs_readl(GUEST_RSP);
+ 	char insn[64];
+-	u32 exit_insn_len;
+-	static int exit_cnt = 0;
++	u32 insn_len;
++	static int cnt = 0;
+ 
+-	pr_info("depriv: cpu %d exit reason=%#x count=%d\n", cpu, exit_reason, ++exit_cnt);
++	guest_regs[__VCPU_REGS_RSP] = guest_rsp;
+ 
+-	pr_debug("depriv: cpu %d rip=%#lx rsp=%#lx\n", cpu, guest_rip, guest_rsp);
+-	pr_debug("depriv: cpu %d host rsp=%#lx\n", cpu, host_rsp);
++	pr_debug("depriv: cpu%d exit count:%d reason:%#x rip:%#lx rsp:%#lx\n",
++		 cpu, ++cnt, reason, guest_rip, guest_rsp);
+ 
+-	pr_debug("depriv: guest GPRs:\n");
+-	for (i = __VCPU_REGS_RAX; i <= __VCPU_REGS_R15; i++) {
+-		pr_debug("\t\t%#lx\n", guest_regs[i]);
+-	}
++	pr_debug("depriv: cpu%d host rsp:%#lx\n", cpu, host_rsp);
+ 
+-	if (exit_reason & VMX_EXIT_REASONS_FAILED_VMENTRY) {
++	if (reason & VMX_EXIT_REASONS_FAILED_VMENTRY) {
+ 		dump_vmcs();
+ 		vmx_check_guest_state();
+ 		// no need to sync guest state to host if we never enter guest
+ 		CONTINUE_IN_ROOT_MODE(0);
+ 	}
+ 
+-	switch (exit_reason) {
++	switch (reason) {
+ 	case EXIT_REASON_EXCEPTION_NMI: {
+ 		/*
+ 		 * u32 idt_vectoring_info = vmcs_read32(IDT_VECTORING_INFO_FIELD);
+-		 * pr_info("depriv: cpu %d vectoring info=%#x\n", idt_vectoring_info);
++		 * pr_info("depriv: cpu%d vectoring info=%#x\n", idt_vectoring_info);
+ 		 */
+-		u32 exit_intr_info = vmcs_read32(VM_EXIT_INTR_INFO);
++		u32 intr_info = vmcs_read32(VM_EXIT_INTR_INFO);
++		u8 vector = intr_info & INTR_INFO_VECTOR_MASK;
++
++		pr_info("depriv: cpu%d intr info:%#x\n", cpu, intr_info);
++
++		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
++		dump_guest_insn(guest_rip, insn_len, insn);
+ 
+-		if (is_invalid_opcode(exit_intr_info)) {
+-			dump_guest_insn(guest_rip, insn);
++		pr_info("depriv: cpu%d hit exception %d @ rip:%#lx insn: %s\n",
++			cpu, vector, guest_rip, insn);
+ 
+-			if (!memcmp((void *)guest_rip, vmx_depriv_special_insn, exit_insn_len)) {
+-				pr_info("depriv: cpu %d executing:%s\n", cpu, insn);
++		if (is_invalid_opcode(intr_info)) {
++			pr_info("depriv: cpu%d hit UD @ rip:%#lx insn: %s\n",
++				cpu, guest_rip, insn);
++#if 0
++			if (!memcmp((void *)guest_rip, vmx_depriv_special_insn, insn_len)) {
++				pr_info("depriv: cpu%d executing:%s\n", cpu, insn);
+ 				vmx_repriv_cpu_state();
+ 				vmx_depriv_execute_special_insn_in_root_mode(guest_regs);
+ 				CONTINUE_IN_NON_ROOT_MODE;
+ 			}
+-			pr_info("depriv: cpu %d UD: %s\n", cpu, insn);
+-		} else if (is_machine_check(exit_intr_info))
+-			pr_info("depriv: cpu %d to handle machine check in root mode\n", cpu);
+-		else if (is_machine_check(exit_intr_info) || is_nmi(exit_intr_info))
+-			pr_info("depriv: cpu %d to handle NMI in root mode\n", cpu);
+-		else {
+-			pr_info("depriv: cpu %d intr info=%#x\n", cpu, exit_intr_info);
+-			dump_guest_insn(guest_rip, insn);
+-		}
++#endif
++		} else if (is_gp_fault(intr_info)) {
++			unsigned long guest_cr4 = vmcs_readl(GUEST_CR4);
++			u8 mov_to_cr3_from_rsp[3] = { 0xf, 0x22, 0xdc };
++
++			pr_info("depriv: cpu%d hit GP @ rip:%#lx insn: %s\n",
++				cpu, guest_rip, insn);
++
++			DEPRIV_DUMP_GPRS;
++
++			if (!memcmp((void *)guest_rip, mov_to_cr3_from_rsp, 3)) {
++				pr_info("depriv: cpu%d executing mov to cr3 from rsp\n", cpu);
++				if (!(guest_cr4 & X86_CR4_PCIDE)) {
++					pr_info("depriv: cpu%d PCID disabled, fixing rsp\n", cpu);
++					vmcs_writel(GUEST_RSP, guest_rsp & ~X86_CR3_PCID_NOFLUSH);
++					CONTINUE_IN_NON_ROOT_MODE;
++				} else
++					pr_info("depriv: cpu%d PCID enabled\n", cpu);
++			}
++		} else if (is_machine_check(intr_info))
++			pr_info("depriv: cpu%d to handle machine check in root mode\n", cpu);
++		else if (is_machine_check(intr_info) || is_nmi(intr_info))
++			pr_info("depriv: cpu%d to handle NMI in root mode\n", cpu);
+ 
+-		pr_info("depriv: cpu %d hit exception and continue in root mode\n", cpu);
++		pr_info("depriv: cpu%d hit exception %d, continue in root mode\n",
++			cpu, vector);
+ 		CONTINUE_IN_ROOT_MODE(0);
+ 		break;
+ 	}
+ 
+ 	case EXIT_REASON_CR_ACCESS: {
+-		unsigned long exit_qualification = vmcs_readl(EXIT_QUALIFICATION);
+-		int cr = exit_qualification & 0xf;
+-		int reg = (exit_qualification >> 8) & 0xf;
+-
+-		dump_guest_insn(guest_rip, insn);
++		unsigned long qualification = vmcs_readl(EXIT_QUALIFICATION);
++		int cr = qualification & 0xf;
++		int reg = (qualification >> 8) & 0xf;
+ 
+ 		if (cr != 3)
+ 			CONTINUE_IN_ROOT_MODE(0);
+ 
+-		switch ((exit_qualification >> 4) & 3) {
++		switch ((qualification >> 4) & 3) {
+ 		case 0: { /* mov to cr */
+ 			unsigned long cr3 = guest_regs[reg];
++			unsigned long guest_cr4 = vmcs_readl(GUEST_CR4);
+ 
+-			cr3 &= ~X86_CR3_PCID_NOFLUSH;
+-			vmcs_writel(GUEST_CR3, cr3);
++			if (!(guest_cr4 & X86_CR4_PCIDE)) {
++				pr_info("depriv: cpu%d PCID disabled, fixing cr3\n", cpu);
++				cr3 &= ~X86_CR3_PCID_NOFLUSH;
++			} else
++				pr_info("depriv: cpu%d PCID enabled\n", cpu);
+ 
+-			if (boot_cpu_has(X86_FEATURE_PTI))
+-				cr3 &= ~PTI_USER_PGTABLE_AND_PCID_MASK;
++			vmcs_writel(GUEST_CR3, cr3);
+ 
+-			//vmcs_writel(HOST_CR3, cr3);
+-			pr_info("depriv: depriv cpu %d write cr3 %#lx : %#lx (%#lx)\n",
+-				cpu, vmcs_readl(HOST_CR3), cr3, guest_regs[reg]);
+-			//write_cr3(cr3);
++			pr_info("depriv: cpu %d wrote cr3 from reg%d: %#lx (%#lx)\n",
++				cpu, cr, cr3, guest_regs[reg]);
+ 			break;
+ 		}
+ 		case 1: /*mov from cr*/
+ 			guest_regs[reg] = vmcs_readl(GUEST_CR3);
+-			pr_debug("depriv: depriv cpu %d read cr3 %#lx : %#lx\n",
+-				 cpu, vmcs_readl(HOST_CR3), guest_regs[reg]);
++
++			/* XXX RSP in guest_regs won't be loaded into non-root mode */
++			if (reg == __VCPU_REGS_RSP)
++				vmcs_writel(GUEST_RSP, guest_regs[reg]);
++
++			pr_debug("depriv: cpu %d read cr3 to reg%d: %#lx\n",
++				 cpu, cr, guest_regs[reg]);
+ 			break;
+ 		}
+ 
+-		if (true && exit_cnt < 400) {
+-			pr_info("depriv: cpu %d accessed cr3 and continue in non-root mode\n", cpu);
++		if (true) {
++			pr_debug("depriv: cpu%d accessed cr3 and continue in non-root mode\n", cpu);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		} else {
+-			pr_info("depriv: cpu %d accessed cr3 and continue in root mode\n", cpu);
+-			exit_insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-			CONTINUE_IN_ROOT_MODE(exit_insn_len);
++			pr_info("depriv: cpu%d accessed cr3 and continue in root mode\n", cpu);
++			insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
++			CONTINUE_IN_ROOT_MODE(insn_len);
+ 		}
+ 	}
+ 
+ 	case EXIT_REASON_CPUID: {
+-		pr_info("depriv: cpu %d cpuid[%#x]\n", cpu, (u32)guest_regs[__VCPU_REGS_RAX]);
++		pr_info("depriv: cpu%d cpuid[%#x]\n", cpu, (u32)guest_regs[__VCPU_REGS_RAX]);
+ 		native_cpuid((unsigned int *)&guest_regs[__VCPU_REGS_RAX],
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RBX],
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RCX],
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RDX]);
+ 
+-		if (exit_cnt < 500) {
+-			pr_debug("depriv: cpu %d executed cpuid and continue in non-root mode\n", cpu);
++		if (cnt < 1000) {
++			pr_debug("depriv: cpu%d executed cpuid and continue in non-root mode\n", cpu);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		} else {
+-			pr_info("depriv: cpu %d executed cpuid and continue in root mode\n", cpu);
+-			exit_insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-			CONTINUE_IN_ROOT_MODE(exit_insn_len);
++			pr_info("depriv: cpu%d executed cpuid and continue in root mode\n", cpu);
++			insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
++			CONTINUE_IN_ROOT_MODE(insn_len);
+ 		}
+ 	}
+ 
+ 	case EXIT_REASON_VMCALL:
+-		if (true) {
+-			pr_info("depriv: cpu %d vmcall: continue in non-root mode\n", cpu);
++		if (false) {
++			pr_info("depriv: cpu%d vmcall: continue in non-root mode\n", cpu);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		}
+ 
+-		exit_insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-		CONTINUE_IN_ROOT_MODE(exit_insn_len);
++		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
++		CONTINUE_IN_ROOT_MODE(insn_len);
+ 		break;
+ 
+ 	case EXIT_REASON_MSR_READ: {
+@@ -8905,18 +8924,18 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		unsigned long long val;
+ 
+ 		if (rdmsrl_safe(ecx, &val)) {
+-			pr_info("depriv: cpu %d msr[%#x]: %#llx failed\n", cpu, ecx, val);
++			pr_info("depriv: cpu%d msr[%#x]: %#llx failed\n", cpu, ecx, val);
+ 			guest_regs[__VCPU_REGS_RAX] = (u32)val;
+ 			guest_regs[__VCPU_REGS_RDX] = (u32)(val >> 32);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		}
+ 
+-		pr_info("depriv: cpu %d msr[%#x]: %#llx\n", cpu, ecx, val);
++		pr_info("depriv: cpu%d msr[%#x]: %#llx\n", cpu, ecx, val);
+ 
+ 		guest_regs[__VCPU_REGS_RAX] = (u32)val;
+ 		guest_regs[__VCPU_REGS_RDX] = (u32)(val >> 32);
+ 
+-		pr_info("depriv: cpu %d executed rdmsr and continue in non-root mode\n", cpu);
++		pr_info("depriv: cpu%d executed rdmsr and continue in non-root mode\n", cpu);
+ 		CONTINUE_IN_NON_ROOT_MODE;
+ 	}
+ 
+@@ -8926,43 +8945,59 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		unsigned long val = (unsigned long)(u32)guest_regs[__VCPU_REGS_RAX] |
+ 				    ((unsigned long)(u32)guest_regs[__VCPU_REGS_RDX] << 32);
+ 
+-		if (wrmsrl_safe(ecx, val))
++		/*
++		 * never change GS BASE, which points to kernel mode per-CPU data and this
++		 * VM exit handler always runs in kernel mode.
++		 */
++		if (ecx != MSR_GS_BASE && wrmsrl_safe(ecx, val))
+ 			continue_in_root_mode = true;
+ 
+ 		switch (ecx) {
+ 		case MSR_IA32_SPEC_CTRL:
+-			pr_debug("depriv: cpu %d speculation control msr = %#lx\n", cpu, val);
++			pr_debug("depriv: cpu%d speculation control msr = %#lx\n", cpu, val);
+ 			break;
+ 		case MSR_FS_BASE:
+-			pr_info("depriv: cpu %d FS base MSR = %#lx\n", cpu, val);
++			pr_info("depriv: cpu%d FS base MSR = %#lx\n", cpu, val);
++			/*
++			 * guest FS base needs to be syned up with MSR_FS_BASE, thus we will
++			 * have correct FS base value in non-root mode after all future VM-entries.
++			 */
+ 			vmcs_writel(GUEST_FS_BASE, val);
++			/*
++			 * host FS base needs to be syned up with MSR_FS_BASE, thus we will
++			 * have correct FS base value in root mode after all future VM-exits.
++			 */
+ 			vmcs_writel(HOST_FS_BASE, val);
+ 			break;
+ 		case MSR_GS_BASE:
+-			pr_info("depriv: cpu %d GS base MSR = %#lx\n", cpu, val);
++			pr_info("depriv: cpu%d GS base MSR = %#lx\n", cpu, val);
++			/*
++			 * guest GS base needs to be syned up with MSR_GS_BASE, thus we will
++			 * have correct GS base value in non-root mode after all future VM-entries.
++			 */
+ 			vmcs_writel(GUEST_GS_BASE, val);
+-			//vmcs_writel(HOST_GS_BASE, val);
++			// never change HOST_GS_BASE, which points to kernel mode per-CPU data
+ 			break;
+ 		case MSR_KERNEL_GS_BASE:
+-			pr_info("depriv: cpu %d kernel GS base MSR = %#lx\n", cpu, val);
++			pr_info("depriv: cpu%d kernel GS base MSR = %#lx\n", cpu, val);
+ 			break;
+ 		case MSR_IA32_TSCDEADLINE:
+-			pr_debug("depriv: cpu %d TSC deadline = %#lx\n", cpu, val);
++			pr_debug("depriv: cpu%d TSC deadline = %#lx\n", cpu, val);
+ 			break;
+ 		case 0x80b: // EOI virtualization msr
+-			pr_debug("depriv: cpu %d EOI msr = %#lx\n", cpu, val);
++			pr_debug("depriv: cpu%d EOI msr = %#lx\n", cpu, val);
+ 			break;
+ 		default:
+-			pr_info("depriv: cpu %d msr[%#x] = %#lx\n", cpu, ecx, val);
++			pr_info("depriv: cpu%d msr[%#x] = %#lx\n", cpu, ecx, val);
+ 			break;
+ 		}
+ 
+ 		if (unlikely(continue_in_root_mode)) {
+-			pr_info("depriv: cpu %d msr[%#x] = %#lx failed, continue in root mode\n",
++			pr_info("depriv: cpu%d msr[%#x] = %#lx failed, continue in root mode\n",
+ 				cpu, ecx, val);
+ 			CONTINUE_IN_ROOT_MODE(0);
+ 		} else {
+-			pr_debug("depriv: cpu %d executed wrmsr and continue in non-root mode\n", cpu);
++			pr_info("depriv: cpu%d executed wrmsr and continue in non-root mode\n", cpu);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		}
+ 
+@@ -8970,7 +9005,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 	}
+ 
+ 	default: /* continue in root mode */
+-		pr_info("depriv: cpu %d exit reason=%#x\n", cpu, exit_reason);
++		pr_info("depriv: cpu%d exit reason=%#x\n", cpu, reason);
+ 		CONTINUE_IN_ROOT_MODE(0);
+ 	}
+ }
+-- 
+2.34.1
+

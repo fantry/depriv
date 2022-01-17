@@ -1,0 +1,39 @@
+From 1c0aae15a1e43f9f86686c53fff42c29c4f1dac1 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 10 Sep 2020 10:11:17 -0700
+Subject: [PATCH 111/140] remove vmx_resume_fail
+
+---
+ arch/x86/depriv/vmx/depriv.c | 16 ----------------
+ 1 file changed, 16 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 3ab7f4dd541f..572642f9bd39 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -1098,22 +1098,6 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ 		vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE), read_msr(MSR_GS_BASE));
+ }
+ 
+-void vmx_resume_fail(void)
+-{
+-	int cpu = raw_smp_processor_id();
+-	unsigned long rsp;
+-
+-	pr_err("depriv: cpu%d resume failed\n", cpu);
+-
+-	asm volatile("mov %%rsp,%0" : "=m"(rsp));
+-	pr_info("depriv: cpu%d current rsp: %#lx\n", cpu, rsp);
+-
+-	pr_info("depriv: cpu%d switching to \"root mode\" with rip %#lx rsp %#lx "
+-		"non-root GS base %#lx kernel GS base MSR %#lx (GS base MSR %#lx)\n",
+-		cpu, vmcs_readl(GUEST_RIP), vmcs_readl(GUEST_RSP),
+-		vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE), read_msr(MSR_GS_BASE));
+-}
+-
+ /*
+  * sync guest state to host w/o changing guest state
+  */
+-- 
+2.34.1
+

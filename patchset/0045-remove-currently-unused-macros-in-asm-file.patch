@@ -1,0 +1,43 @@
+From 7ccc938ee41de9ad1a008fdde2f9aa704b2bf349 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 18:22:08 -0700
+Subject: [PATCH 045/140] remove currently unused macros in asm file
+
+---
+ arch/x86/kvm/vmx/depriv_entry.S | 20 --------------------
+ 1 file changed, 20 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index 28d2c7afdbb6..5c04fe40f775 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -4,26 +4,6 @@
+ #include <asm/kvm_vcpu_regs.h>
+ #include <asm/msr-index.h>
+ 
+-#define WORD_SIZE (BITS_PER_LONG / 8)
+-
+-#define VCPU_RAX	__VCPU_REGS_RAX * WORD_SIZE
+-#define VCPU_RCX	__VCPU_REGS_RCX * WORD_SIZE
+-#define VCPU_RDX	__VCPU_REGS_RDX * WORD_SIZE
+-#define VCPU_RBX	__VCPU_REGS_RBX * WORD_SIZE
+-/* Intentionally omit RSP as it's context switched by hardware */
+-#define VCPU_RBP	__VCPU_REGS_RBP * WORD_SIZE
+-#define VCPU_RSI	__VCPU_REGS_RSI * WORD_SIZE
+-#define VCPU_RDI	__VCPU_REGS_RDI * WORD_SIZE
+-
+-#define VCPU_R8		__VCPU_REGS_R8  * WORD_SIZE
+-#define VCPU_R9		__VCPU_REGS_R9  * WORD_SIZE
+-#define VCPU_R10	__VCPU_REGS_R10 * WORD_SIZE
+-#define VCPU_R11	__VCPU_REGS_R11 * WORD_SIZE
+-#define VCPU_R12	__VCPU_REGS_R12 * WORD_SIZE
+-#define VCPU_R13	__VCPU_REGS_R13 * WORD_SIZE
+-#define VCPU_R14	__VCPU_REGS_R14 * WORD_SIZE
+-#define VCPU_R15	__VCPU_REGS_R15 * WORD_SIZE
+-
+ 	.text
+ 
+ SYM_CODE_START(depriv_continue_in_root_mode)
+-- 
+2.34.1
+

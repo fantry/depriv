@@ -1,0 +1,139 @@
+From 4e3c8254ea2beef6a033206a883296b37901e296 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Mon, 26 Oct 2020 11:17:58 -0700
+Subject: [PATCH 131/140] optimize fs/gs segments restore
+
+---
+ arch/x86/depriv/vmx/depriv.c | 15 ++++-----------
+ arch/x86/depriv/vmx/vmx.c    | 22 +++++++++++++++++-----
+ arch/x86/depriv/vmx/vmx.h    |  2 +-
+ arch/x86/depriv/x86.c        |  8 ++++++--
+ 4 files changed, 28 insertions(+), 19 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index e19eebbede84..db235442cc24 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -129,21 +129,14 @@ void vmx_validate_vmcs(void);
+ static bool __vmx_depriv(bool launch)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	unsigned long rip, rsp;
++	unsigned long rsp;
+ 	int depriv_result;
+ 
+-	rip = (unsigned long)vmx_depriv_rip;
+-	vmcs_writel(GUEST_RIP, rip);
+-
+ 	asm volatile("mov %%rsp,%0" : "=m"(rsp));
+ 	// reserve extra 8 bytes for RIP pushed to stack when calling asm_vmx_depriv
+-	rsp -= 8;
+-	vmcs_writel(GUEST_RSP, rsp);
+-
++	vmcs_writel(GUEST_RSP, rsp - 8);
+ 	vmcs_writel(GUEST_RFLAGS, arch_local_save_flags());
+-
+-	if (launch)
+-		pr_info("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n", cpu, rip, rsp);
++	vmcs_writel(GUEST_RIP, (unsigned long)vmx_depriv_rip);
+ 
+ 	/*
+ 	 * Should we save/restore general purpose registers around asm_vmx_depriv?
+@@ -514,7 +507,7 @@ static bool vmx_depriv(struct task_struct *next)
+ 		}
+ 
+ 		vmcs_writel(GUEST_CR3, __read_cr3());
+-		vmx_depriv_cpu_segments();
++		vmx_depriv_cpu_fsgs();
+ 
+ 		r = __vmx_depriv(false);
+ 	} else {
+diff --git a/arch/x86/depriv/vmx/vmx.c b/arch/x86/depriv/vmx/vmx.c
+index 4ec0b95555ca..bebaed357ee8 100644
+--- a/arch/x86/depriv/vmx/vmx.c
++++ b/arch/x86/depriv/vmx/vmx.c
+@@ -523,7 +523,7 @@ static void vmx_depriv_cpu_tr(unsigned long gdt_base)
+ 	}
+ }
+ 
+-void vmx_depriv_cpu_segments(void)
++void vmx_depriv_cpu_fsgs(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	unsigned long gdt_base = vmcs_readl(HOST_GDTR_BASE);
+@@ -531,10 +531,6 @@ void vmx_depriv_cpu_segments(void)
+ 	unsigned long base;
+ 	bool is_segment = true;
+ 
+-	DEPRIV_SEGMENT(CS);
+-	DEPRIV_SEGMENT(DS);
+-	DEPRIV_SEGMENT(ES);
+-	DEPRIV_SEGMENT(SS);
+ 	DEPRIV_SEGMENT(FS);
+ 	DEPRIV_SEGMENT(GS);
+ 
+@@ -547,6 +543,22 @@ void vmx_depriv_cpu_segments(void)
+ 	pr_debug("depriv: cpu%d GS base MSR %#lx\n", cpu, base);
+ 	vmcs_writel(HOST_GS_BASE, base);
+ 	vmcs_writel(GUEST_GS_BASE, base);
++}
++
++static void vmx_depriv_cpu_segments(void)
++{
++	int cpu = raw_smp_processor_id();
++	unsigned long gdt_base = vmcs_readl(HOST_GDTR_BASE);
++	struct desc_struct *dentry;
++	unsigned long base;
++	bool is_segment = true;
++
++	DEPRIV_SEGMENT(CS);
++	DEPRIV_SEGMENT(DS);
++	DEPRIV_SEGMENT(ES);
++	DEPRIV_SEGMENT(SS);
++
++	vmx_depriv_cpu_fsgs();
+ 
+ 	vmx_depriv_cpu_ldtr(gdt_base);
+ 	vmx_depriv_cpu_tr(gdt_base);
+diff --git a/arch/x86/depriv/vmx/vmx.h b/arch/x86/depriv/vmx/vmx.h
+index 8f3efefa0ad6..b13654042293 100644
+--- a/arch/x86/depriv/vmx/vmx.h
++++ b/arch/x86/depriv/vmx/vmx.h
+@@ -330,6 +330,6 @@ inline int __cpu_vmxon(u64 vmxon_pointer);
+ inline void __cpu_vmxoff(void);
+ 
+ void vmx_depriv_cpu_state(void);
+-void vmx_depriv_cpu_segments(void);
++void vmx_depriv_cpu_fsgs(void);
+ 
+ #endif /* __DEPRIV_X86_VMX_H */
+diff --git a/arch/x86/depriv/x86.c b/arch/x86/depriv/x86.c
+index 2ba0dbafd46a..18917b7d3d20 100644
+--- a/arch/x86/depriv/x86.c
++++ b/arch/x86/depriv/x86.c
+@@ -7,6 +7,7 @@
+  */
+ 
+ #include <linux/sched.h>
++#include <linux/pid_namespace.h>
+ 
+ #include <asm/depriv.h>
+ #include <asm/percpu.h>
+@@ -28,9 +29,12 @@ EXPORT_SYMBOL_GPL(depriv_ops);
+  */
+ void depriv_switch(struct task_struct *prev, struct task_struct *next)
+ {
+-	int cpu = smp_processor_id();
++	BUG_ON(!arch_irqs_disabled());
+ 
+-	if (!per_cpu(depriv_cpu_state, cpu))
++	if (task_active_pid_ns(prev) == task_active_pid_ns(next))
++		return;
++
++	if (!per_cpu(depriv_cpu_state, smp_processor_id()))
+ 		return;
+ 
+ 	if (depriv_ops.exit)
+-- 
+2.34.1
+

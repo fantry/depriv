@@ -1,0 +1,45 @@
+From 99697b1cb8887e231b62c73390e964fbed339e0f Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 21 Jun 2020 15:30:22 -0700
+Subject: [PATCH 078/140] remove FS/GS base from trampoline code
+
+---
+ arch/x86/kvm/vmx/depriv.c | 8 --------
+ 1 file changed, 8 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 30319423d489..bbad4609ad7c 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -65,8 +65,6 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ #define DEPRIV_IRET_STACK_GUEST_RSP		(3 * 8)
+ #define DEPRIV_IRET_STACK_GUEST_SS		(4 * 8)
+ #define DEPRIV_IRET_STACK_GUEST_CR3		(5 * 8)
+-#define DEPRIV_IRET_STACK_GUEST_GS_BASE		(6 * 8)
+-#define DEPRIV_IRET_STACK_GUEST_FS_BASE		(7 * 8)
+ 
+ static struct vmcs_config depriv_vmcs_conf;
+ static unsigned long depriv_task_cr3_pa;
+@@ -534,10 +532,6 @@ void vmx_depriv_vmcall(void);
+ 	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_SS))
+ #define	DEPRIV_IRET_STACK_CR3							\
+ 	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_CR3))
+-#define	DEPRIV_IRET_STACK_GS_BASE						\
+-	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_GS_BASE))
+-#define	DEPRIV_IRET_STACK_FS_BASE						\
+-	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_FS_BASE))
+ 
+ #define DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ip_off) do {			\
+ 	DEPRIV_IRET_STACK_RIP		= rip + (ip_off);			\
+@@ -546,8 +540,6 @@ void vmx_depriv_vmcall(void);
+ 	DEPRIV_IRET_STACK_RSP		= vmcs_readl(GUEST_RSP);		\
+ 	DEPRIV_IRET_STACK_SS		= vmcs_read16(GUEST_SS_SELECTOR);	\
+ 	DEPRIV_IRET_STACK_CR3		= vmcs_readl(GUEST_CR3);		\
+-	DEPRIV_IRET_STACK_GS_BASE	= vmcs_readl(GUEST_GS_BASE);		\
+-	DEPRIV_IRET_STACK_FS_BASE	= vmcs_readl(GUEST_FS_BASE);		\
+ } while (0)
+ 
+ static inline u64 depriv_iret_stack_base(int cpu)
+-- 
+2.34.1
+

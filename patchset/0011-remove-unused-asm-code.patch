@@ -1,0 +1,82 @@
+From 382ee5c4646c10bef072e7d4e552af95922a194c Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 11 Jun 2020 00:25:29 -0700
+Subject: [PATCH 011/140] remove unused asm code
+
+---
+ arch/x86/kvm/vmx/vmenter.S | 16 ++--------------
+ arch/x86/kvm/vmx/vmx.c     |  8 ++++----
+ 2 files changed, 6 insertions(+), 18 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmenter.S b/arch/x86/kvm/vmx/vmenter.S
+index fdb129410e46..8e16b6ddc3cf 100644
+--- a/arch/x86/kvm/vmx/vmenter.S
++++ b/arch/x86/kvm/vmx/vmenter.S
+@@ -153,7 +153,8 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	pop %r14
+ 	pop %r15
+ 
+-	jne 1f
++	jne vmx_depriv_continue_in_root_mode
++
+ 	/*
+ 	 * upon vmx_depriv_vmexit_handler returning true, continue non-root mode
+ 	 */
+@@ -173,19 +174,6 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	 * upon vmx_depriv_vmexit_handler returning false, switch back to root
+ 	 * mode with guest stack
+ 	 */
+-1:	jmp vmx_depriv_continue_in_root_mode
+-
+-2:	mov (%rsp), %rax
+-	mov %rax, %rsp
+-	pop %rax
+-	/*
+-	 * sync up flags, external interrupts could be allowed
+-	 */
+-	popf
+-	/*
+-	 * execute or skip the instruction just causing the VM exit in root mode
+-	 */
+-	ret
+ SYM_FUNC_END(vmx_depriv_vmexit)
+ 
+ /**
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 01144d3ec08c..46c453928fd8 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8814,16 +8814,16 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		u32 intr_info = vmcs_read32(VM_EXIT_INTR_INFO);
+ 		u8 vector = intr_info & INTR_INFO_VECTOR_MASK;
+ 
+-		pr_info("depriv: cpu%d intr info:%#x\n", cpu, intr_info);
++		pr_info("depriv: cpu%d intr info: %#x\n", cpu, intr_info);
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 		dump_guest_insn(guest_rip, insn_len, insn);
+ 
+-		pr_info("depriv: cpu%d hit exception %d @ rip:%#lx insn: %s\n",
++		pr_info("depriv: cpu%d hit exception %d @ rip %#lx insn: %s\n",
+ 			cpu, vector, guest_rip, insn);
+ 
+ 		if (is_invalid_opcode(intr_info)) {
+-			pr_info("depriv: cpu%d hit UD @ rip:%#lx insn: %s\n",
++			pr_info("depriv: cpu%d hit UD @ rip %#lx insn: %s\n",
+ 				cpu, guest_rip, insn);
+ 		} else if (is_page_fault(intr_info)) {
+ 			unsigned long cr2 = vmcs_readl(EXIT_QUALIFICATION);
+@@ -8852,9 +8852,9 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, insn_len);
+ 			vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
+ 
+-			continue_in_root_mode = false;
+ 			pr_info("depriv: cpu%d injecting exception %d, continue in non-root mode\n",
+ 				cpu, vector);
++			dump_vmcs();
+ 			return true;
+ 		} else if (is_gp_fault(intr_info)) {
+ 			pr_info("depriv: cpu%d hit GP @ rip:%#lx insn: %s\n",
+-- 
+2.34.1
+

@@ -1,0 +1,313 @@
+From efd5c01e9dc0ff1d5e2a154aa024813068437b74 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 11 Jun 2020 00:01:34 -0700
+Subject: [PATCH 009/140] die at poping stack in root mode
+
+---
+ arch/x86/kvm/vmx/vmenter.S |  89 ----------------------------
+ arch/x86/kvm/vmx/vmx.c     | 117 ++++++++++++++++++++++++-------------
+ 2 files changed, 77 insertions(+), 129 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmenter.S b/arch/x86/kvm/vmx/vmenter.S
+index 23f70b795c38..fdb129410e46 100644
+--- a/arch/x86/kvm/vmx/vmenter.S
++++ b/arch/x86/kvm/vmx/vmenter.S
+@@ -98,95 +98,6 @@ SYM_FUNC_START(vmx_depriv_test_vmcall)
+ 	ret
+ SYM_FUNC_END(vmx_depriv_test_vmcall)
+ 
+-SYM_FUNC_START(vmx_depriv_execute_special_insn_in_root_mode)
+-	push %rax
+-	mov %_ASM_ARG1, %_ASM_AX
+-
+-	push %r15
+-	push %r14
+-	push %r13
+-	push %r12
+-	push %r11
+-	push %r10
+-	push %r9
+-	push %r8
+-	push %rdi
+-	push %rsi
+-	push %rbp
+-	push %rsp
+-	push %rbx
+-	push %rdx
+-	push %rcx
+-	push %rax
+-
+-	mov VCPU_RCX(%_ASM_AX), %_ASM_CX
+-	mov VCPU_RDX(%_ASM_AX), %_ASM_DX
+-	mov VCPU_RBX(%_ASM_AX), %_ASM_BX
+-	mov VCPU_RBP(%_ASM_AX), %_ASM_BP
+-	mov VCPU_RSI(%_ASM_AX), %_ASM_SI
+-	mov VCPU_RDI(%_ASM_AX), %_ASM_DI
+-	mov VCPU_R8 (%_ASM_AX),  %r8
+-	mov VCPU_R9 (%_ASM_AX),  %r9
+-	mov VCPU_R10(%_ASM_AX), %r10
+-	mov VCPU_R11(%_ASM_AX), %r11
+-	mov VCPU_R12(%_ASM_AX), %r12
+-	mov VCPU_R13(%_ASM_AX), %r13
+-	mov VCPU_R14(%_ASM_AX), %r14
+-	mov VCPU_R15(%_ASM_AX), %r15
+-	// overwirte RAX in last step
+-	mov VCPU_RAX(%_ASM_AX), %_ASM_AX
+-
+-SYM_CODE_START(vmx_depriv_special_insn)
+-	.byte 0x48, 0x0f, 0xc7, 0x1f
+-	nop
+-	nop
+-	nop
+-	nop
+-	nop
+-	nop
+-	nop
+-	nop
+-	nop
+-	nop
+-	nop
+-	nop
+-
+-	pop %rax
+-	mov %_ASM_CX,   VCPU_RCX(%_ASM_AX)
+-	mov %_ASM_DX,   VCPU_RDX(%_ASM_AX)
+-	mov %_ASM_BX,   VCPU_RBX(%_ASM_AX)
+-	mov %_ASM_BP,   VCPU_RBP(%_ASM_AX)
+-	mov %_ASM_SI,   VCPU_RSI(%_ASM_AX)
+-	mov %_ASM_DI,   VCPU_RDI(%_ASM_AX)
+-	mov %r8,  VCPU_R8 (%_ASM_AX)
+-	mov %r9,  VCPU_R9 (%_ASM_AX)
+-	mov %r10, VCPU_R10(%_ASM_AX)
+-	mov %r11, VCPU_R11(%_ASM_AX)
+-	mov %r12, VCPU_R12(%_ASM_AX)
+-	mov %r13, VCPU_R13(%_ASM_AX)
+-	mov %r14, VCPU_R14(%_ASM_AX)
+-	mov %r15, VCPU_R15(%_ASM_AX)
+-
+-	pop %rcx
+-	pop %rdx
+-	pop %rbx
+-	pop %rbp
+-	pop %rbp
+-	pop %rsi
+-	pop %rdi
+-	pop %r8
+-	pop %r9
+-	pop %r10
+-	pop %r11
+-	pop %r12
+-	pop %r13
+-	pop %r14
+-	pop %r15
+-
+-	pop %rax
+-	ret
+-SYM_FUNC_END(vmx_depriv_execute_special_insn_in_root_mode)
+-
+ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	push %r15
+ 	push %r14
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index c22f04c2c048..4bee739f5607 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8727,24 +8727,6 @@ static void vmx_repriv_cpu_state(void)
+ 	return true;								\
+ } while (0)
+ 
+-/*
+- * push current guest RAX, RFLAGS and RIP to guest stask top
+- * XXX: look it's okay to trigger stack page fault in the macro?
+- */
+-#define CONTINUE_IN_ROOT_MODE__OLD(_rip_offset) do {				\
+-	guest_rsp -= 24;							\
+-	*(unsigned long *)(guest_rsp + 0) = guest_regs[__VCPU_REGS_RAX];	\
+-	*(unsigned long *)(guest_rsp + 8) = vmcs_readl(GUEST_RFLAGS);		\
+-	*(unsigned long *)(guest_rsp + 16) = guest_rip + (_rip_offset);		\
+-	*(unsigned long *)host_rsp = guest_rsp;					\
+-	vmx_repriv_cpu_state();							\
+-	dump_vmcs();								\
+-	pr_info("depriv: cpu%d exit reason %d skip %d bytes instruction "	\
+-		"and continue in root mode\n",					\
+-		cpu, reason, _rip_offset);					\
+-	return false;								\
+-} while (0)
+-
+ #define CONTINUE_IN_ROOT_MODE(insn_len) do {					\
+ 	*(unsigned long *)(host_rsp + 0x0) = vmcs_readl(GUEST_RIP) + (insn_len);\
+ 	*(unsigned long *)(host_rsp + 0x8) = vmcs_read16(GUEST_CS_SELECTOR);	\
+@@ -8771,13 +8753,25 @@ static void vmx_repriv_cpu_state(void)
+ 	}									\
+ } while (0)
+ 
+-void vmx_depriv_special_insn(void);
+-void vmx_depriv_execute_special_insn_in_root_mode(unsigned long *guest_regs);
++static inline bool is_canonical_address(u64 la, u64 cr4)
++{
++	return get_canonical(la, cr4 & X86_CR4_LA57 ? 57 : 48) == la;
++}
+ 
++/*
++ * if guest_rip is a user level virtual address then it's mostly not valid in
++ * root mode, because it is mapped using non-root mode cr3 and page tables.
++ */
+ static void dump_guest_insn(unsigned long guest_rip, int insn_len, char *insn)
+ {
+ 	int i;
+ 
++	// don't try to access user level virtual address
++	if (!(guest_rip & 0xf000000000000000ul)) {
++		memset(insn, 0, MAX_INSN_SIZE * 3 + 1);
++		return;
++	}
++
+ 	if (insn_len == 0)
+ 		insn_len = MAX_INSN_SIZE;
+ 
+@@ -8812,6 +8806,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 
+ 	switch (reason) {
+ 	case EXIT_REASON_EXCEPTION_NMI: {
++		bool continue_in_root_mode = true;
+ 		/*
+ 		 * u32 idt_vectoring_info = vmcs_read32(IDT_VECTORING_INFO_FIELD);
+ 		 * pr_info("depriv: cpu%d vectoring info=%#x\n", idt_vectoring_info);
+@@ -8830,23 +8825,45 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		if (is_invalid_opcode(intr_info)) {
+ 			pr_info("depriv: cpu%d hit UD @ rip:%#lx insn: %s\n",
+ 				cpu, guest_rip, insn);
+-#if 0
+-			if (!memcmp((void *)guest_rip, vmx_depriv_special_insn, insn_len)) {
+-				pr_info("depriv: cpu%d executing:%s\n", cpu, insn);
+-				vmx_repriv_cpu_state();
+-				vmx_depriv_execute_special_insn_in_root_mode(guest_regs);
+-				CONTINUE_IN_NON_ROOT_MODE;
+-			}
+-#endif
++		} else if (is_page_fault(intr_info)) {
++			unsigned long cr2 = vmcs_readl(EXIT_QUALIFICATION);
++			unsigned long host_base, guest_base;
++			u32 intr, error_code = 0;
++
++			if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
++				error_code = vmcs_read32(VM_EXIT_INTR_ERROR_CODE);
++
++			pr_info("depriv: cpu%d page fault @ %#lx with error code %#x\n",
++				cpu, cr2, error_code);
++
++			host_base = read_msr(MSR_FS_BASE);
++			guest_base = vmcs_readl(GUEST_FS_BASE);
++			pr_info("depriv: cpu%d FS base %#lx : %#lx\n",
++				cpu, host_base, guest_base);
++
++			host_base = read_msr(MSR_GS_BASE);
++			guest_base = vmcs_readl(GUEST_GS_BASE);
++			pr_info("depriv: cpu%d GS base %#lx : %#lx kernel GS base %#lx\n",
++				cpu, host_base, guest_base, read_msr(MSR_KERNEL_GS_BASE));
++
++			intr = vector | INTR_INFO_VALID_MASK;
++			intr |= INTR_TYPE_SOFT_INTR | INTR_INFO_DELIVER_CODE_MASK;
++			vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr);
++			vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, insn_len);
++			vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
++
++			continue_in_root_mode = false;
++			pr_info("depriv: cpu%d injecting exception %d, continue in non-root mode\n",
++				cpu, vector);
++			return true;
+ 		} else if (is_gp_fault(intr_info)) {
+-			unsigned long guest_cr4 = vmcs_readl(GUEST_CR4);
+-			u8 mov_to_cr3_from_rsp[3] = { 0xf, 0x22, 0xdc };
+-
+ 			pr_info("depriv: cpu%d hit GP @ rip:%#lx insn: %s\n",
+ 				cpu, guest_rip, insn);
+ 
+ 			DEPRIV_DUMP_GPRS;
+-
++#if 0
++			unsigned long guest_cr4 = vmcs_readl(GUEST_CR4);
++			u8 mov_to_cr3_from_rsp[3] = { 0xf, 0x22, 0xdc };
+ 			if (!memcmp((void *)guest_rip, mov_to_cr3_from_rsp, 3)) {
+ 				pr_info("depriv: cpu%d executing mov to cr3 from rsp\n", cpu);
+ 				if (!(guest_cr4 & X86_CR4_PCIDE)) {
+@@ -8856,14 +8873,21 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 				} else
+ 					pr_info("depriv: cpu%d PCID enabled\n", cpu);
+ 			}
++#endif
+ 		} else if (is_machine_check(intr_info))
+ 			pr_info("depriv: cpu%d to handle machine check in root mode\n", cpu);
+ 		else if (is_machine_check(intr_info) || is_nmi(intr_info))
+ 			pr_info("depriv: cpu%d to handle NMI in root mode\n", cpu);
+ 
+-		pr_info("depriv: cpu%d hit exception %d, continue in root mode\n",
+-			cpu, vector);
+-		CONTINUE_IN_ROOT_MODE(0);
++		if (continue_in_root_mode) {
++			pr_info("depriv: cpu%d hit exception %d, continue in root mode\n",
++				cpu, vector);
++			CONTINUE_IN_ROOT_MODE(0);
++		} else {
++			pr_info("depriv: cpu%d hit exception %d, continue in non-root mode\n",
++				cpu, vector);
++			CONTINUE_IN_NON_ROOT_MODE;
++		}
+ 		break;
+ 	}
+ 
+@@ -8915,7 +8939,17 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 	}
+ 
+ 	case EXIT_REASON_CPUID: {
++		static int cnt_cpuid_0x2 = 0;
+ 		pr_info("depriv: cpu%d cpuid[%#x]\n", cpu, (u32)guest_regs[__VCPU_REGS_RAX]);
++
++		if ((u32)guest_regs[__VCPU_REGS_RAX] == 0x2) {
++			cnt_cpuid_0x2++;
++			if (cnt_cpuid_0x2 == 20) {
++				vmcs_write32(EXCEPTION_BITMAP, 0xffffffff);
++				pr_info("depriv: cpu%d all fault VM-exit enabeld\n", cpu);
++			}
++		}
++
+ 		native_cpuid((unsigned int *)&guest_regs[__VCPU_REGS_RAX],
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RBX],
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RCX],
+@@ -8944,6 +8978,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 	case EXIT_REASON_MSR_READ: {
+ 		u32 ecx = (u32)guest_regs[__VCPU_REGS_RCX];
+ 		unsigned long long val;
++		static int cnt_0x3b = 0;
+ 
+ 		if (rdmsrl_safe(ecx, &val)) {
+ 			pr_info("depriv: cpu%d msr[%#x]: %#llx failed\n", cpu, ecx, val);
+@@ -8953,6 +8988,13 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		}
+ 
+ 		pr_info("depriv: cpu%d msr[%#x]: %#llx\n", cpu, ecx, val);
++		if (ecx == 0x3b) {
++			cnt_0x3b++;
++			if (cnt_0x3b == 2) {
++				vmcs_write32(EXCEPTION_BITMAP, 0xffffffff);
++				pr_info("depriv: cpu%d all fault VM-exit enabeld\n", cpu);
++			}
++		}
+ 
+ 		guest_regs[__VCPU_REGS_RAX] = (u32)val;
+ 		guest_regs[__VCPU_REGS_RDX] = (u32)(val >> 32);
+@@ -9277,11 +9319,6 @@ module_init(vmx_init);
+ 	CHECK((~(ctls) & ((u32)(val))) == 0 &&				\
+ 	      ((ctls) & ~((u32)((val) >> 32))) == 0)
+ 
+-static inline bool is_canonical_address(u64 la, u64 cr4)
+-{
+-	return get_canonical(la, cr4 & X86_CR4_LA57 ? 57 : 48) == la;
+-}
+-
+ #define CHECK_HOST_SEG(seg)						\
+ 	CHECK((vmcs_read16(HOST_##seg##_SELECTOR) & 0x7) == 0)
+ 
+-- 
+2.34.1
+

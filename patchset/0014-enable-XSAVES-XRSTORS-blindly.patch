@@ -1,0 +1,26 @@
+From 1bd9402c04dbf84bfa0ba290c35a444a788d3fc8 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Fri, 12 Jun 2020 07:57:01 -0700
+Subject: [PATCH 014/140] enable XSAVES/XRSTORS blindly
+
+---
+ arch/x86/kvm/vmx/vmx.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 226183afab48..1f138fee4e60 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -9132,7 +9132,8 @@ static int __init setup_depriv_vmcs_config(void)
+ 	if (_cpu_based_exec_control & CPU_BASED_ACTIVATE_SECONDARY_CONTROLS) {
+ 		min2 = 0;
+ 		opt2 = SECONDARY_EXEC_RDTSCP |
+-		       SECONDARY_EXEC_ENABLE_INVPCID;
++		       SECONDARY_EXEC_ENABLE_INVPCID |
++		       SECONDARY_EXEC_XSAVES;
+ 		if (adjust_vmx_controls(min2, opt2,
+ 					MSR_IA32_VMX_PROCBASED_CTLS2,
+ 					&_cpu_based_2nd_exec_control) < 0)
+-- 
+2.34.1
+

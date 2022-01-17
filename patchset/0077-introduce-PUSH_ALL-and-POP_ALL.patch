@@ -1,0 +1,243 @@
+From 8492259337d52437586c537785d6478deaa2b3e8 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 21 Jun 2020 13:24:22 -0700
+Subject: [PATCH 077/140] introduce PUSH_ALL and POP_ALL
+
+---
+ arch/x86/entry/entry_64.S       | 14 +----
+ arch/x86/kvm/vmx/depriv.c       | 14 +++--
+ arch/x86/kvm/vmx/depriv_entry.S | 97 +++++++++++++--------------------
+ 3 files changed, 48 insertions(+), 77 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 21247bb246ea..5d9eecccba47 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1415,27 +1415,15 @@ nmi_restore:
+ SYM_CODE_END(asm_exc_nmi)
+ 
+ SYM_CODE_START(depriv_continue_in_root_mode)
+-	push	%rdx
+-	push	%rcx
+ 	push	%rax
+ 
+ 	/*
+ 	 * switch to guest CR3
+ 	 */
+-	mov	0x40(%rsp), %rax
++	mov	0x30(%rsp), %rax
+ 	mov	%rax, %cr3
+ 
+-	/*
+-	 * set to guest GS base
+-	 */
+-	movl	$MSR_GS_BASE, %ecx
+-	movl	0x48(%rsp), %eax
+-	movl	0x4c(%rsp), %edx
+-	wrmsr
+-
+ 	pop	%rax
+-	pop	%rcx
+-	pop	%rdx
+ 	iretq
+ SYM_CODE_END(depriv_continue_in_root_mode)
+ EXPORT_SYMBOL(depriv_continue_in_root_mode)
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index ba9f94cebdad..30319423d489 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -518,7 +518,7 @@ static void vmx_repriv_cpu_release_resources(void)
+ }
+ 
+ void vmx_depriv_vmexit(void);
+-int vmx_depriv(unsigned long host_rsp);
++int vmx_depriv(void);
+ void vmx_depriv_rip(void);
+ void vmx_depriv_vmcall(void);
+ 
+@@ -647,7 +647,7 @@ static void vmx_depriv_cpu(void *info)
+ 	/*
+ 	 * Should we save/restore general purpose registers around vmx_depriv?
+ 	 */
+-	vmx_depriv_result = vmx_depriv(host_rsp);
++	vmx_depriv_result = vmx_depriv();
+ 	atomic_inc(&depriv_cpu_count);
+ 	if (!vmx_depriv_result)
+ 		// continue in non-root mode...
+@@ -849,6 +849,11 @@ void vmx_repriv_cpu_state(void)
+ 	vmx_repriv_cpu_misc();
+ 	vmx_repriv_cpu_sysenter_msrs();
+ 	vmx_repriv_cpu_desc_tables();
++
++	/*
++	 * last step: overwrite GS base MSR with guest GS base
++	 */
++	wrmsrl(MSR_GS_BASE, vmcs_readl(GUEST_GS_BASE));
+ }
+ 
+ #define DEPRIV_CONTINUE_IN_NON_ROOT_MODE(ins_len) do {				\
+@@ -914,10 +919,11 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			     (unsigned int *)&regs[VCPU_REGS_RCX],
+ 			     (unsigned int *)&regs[VCPU_REGS_RDX]);
+ 
+-		if (test_handle_vmresume_failure && counter > 22000) {
++		if (test_handle_vmresume_failure && counter > 12000) {
+ 			pr_info("depriv: cpu%d (%ld) triggering vmresume fail\n",
+ 				cpu, counter);
+-			vmcs_write32(CR3_TARGET_COUNT, 0x100000);
++			//vmcs_write32(CR3_TARGET_COUNT, 0x100000);
++			vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
+ 		}
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index dc21c9956971..1fbb65a4bd42 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -4,9 +4,7 @@
+ #include <asm/kvm_vcpu_regs.h>
+ #include <asm/msr-index.h>
+ 
+-	.text
+-
+-SYM_CODE_START(vmx_depriv_continue_in_root_mode)
++.macro PUSH_AND_CLEAR_ALL
+ 	push %r15
+ 	push %r14
+ 	push %r13
+@@ -24,8 +22,24 @@ SYM_CODE_START(vmx_depriv_continue_in_root_mode)
+ 	push %rcx
+ 	push %rax
+ 
+-	call vmx_repriv_cpu_state
++	xor %rax, %rax
++	xor %rcx, %rcx
++	xor %rdx, %rdx
++	xor %rbx, %rbx
++	xor %rbp, %rbp
++	xor %rsi, %rsi
++	xor %rdi, %rdi
++	xor %r8,  %r8
++	xor %r9,  %r9
++	xor %r10, %r10
++	xor %r11, %r11
++	xor %r12, %r12
++	xor %r13, %r13
++	xor %r14, %r14
++	xor %r15, %r15
++.endm
+ 
++.macro POP_ALL
+ 	pop %rax
+ 	pop %rcx
+ 	pop %rdx
+@@ -42,14 +56,22 @@ SYM_CODE_START(vmx_depriv_continue_in_root_mode)
+ 	pop %r13
+ 	pop %r14
+ 	pop %r15
++.endm
++
++	.text
++
++SYM_CODE_START(vmx_depriv_continue_in_root_mode)
++	PUSH_AND_CLEAR_ALL
++
++	call vmx_repriv_cpu_state
+ 
+ 	/*
+ 	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
+ 	 */
+-	push %rax
+-	mov	$1, %eax
+-	movl	%eax, 0x10(%rsp)
+-	pop %rax
++	mov	$1, %rax
++	mov	%rax, 0x88(%rsp)
++
++	POP_ALL
+ 
+ 	/*
+ 	 * switch to iret stack, which is mapped even in user space CR3
+@@ -66,12 +88,14 @@ SYM_FUNC_START(vmx_depriv)
+ 	vmlaunch
+ 
+ 	/* vmlaunch failed, switch to root mode stask */
+-	mov %_ASM_ARG1, %rsp
++	xor %eax, %eax
+ 	mov $1, %eax
+-	jmp vmx_depriv_continue_in_root_mode
++	ret
+ SYM_FUNC_END(vmx_depriv)
+ 
+-/* vmlaunch succeeded */
++/*
++ * vmlaunch succeeded
++ */
+ SYM_FUNC_START(vmx_depriv_rip)
+ 	/* to instruction immediately after vmx_depriv */
+ 	ret
+@@ -84,59 +108,12 @@ SYM_FUNC_START(vmx_depriv_vmcall)
+ SYM_FUNC_END(vmx_depriv_vmcall)
+ 
+ SYM_FUNC_START(vmx_depriv_vmexit)
+-	push %r15
+-	push %r14
+-	push %r13
+-	push %r12
+-	push %r11
+-	push %r10
+-	push %r9
+-	push %r8
+-	push %rdi
+-	push %rsi
+-	push %rbp
+-	push %rsp
+-	push %rbx
+-	push %rdx
+-	push %rcx
+-	push %rax
+-
+-	xor %rax, %rax
+-	xor %rcx, %rcx
+-	xor %rdx, %rdx
+-	xor %rbx, %rbx
+-	xor %rbp, %rbp
+-	xor %rsi, %rsi
+-	xor %rdi, %rdi
+-	xor %r8,  %r8
+-	xor %r9,  %r9
+-	xor %r10, %r10
+-	xor %r11, %r11
+-	xor %r12, %r12
+-	xor %r13, %r13
+-	xor %r14, %r14
+-	xor %r15, %r15
++	PUSH_AND_CLEAR_ALL
+ 
+ 	mov %rsp, %_ASM_ARG1
+ 	call vmx_depriv_vmexit_handler
+ 	cmpb $1, %al
+-
+-	pop %rax
+-	pop %rcx
+-	pop %rdx
+-	pop %rbx
+-	pop %r8
+-	pop %rbp
+-	pop %rsi
+-	pop %rdi
+-	pop %r8
+-	pop %r9
+-	pop %r10
+-	pop %r11
+-	pop %r12
+-	pop %r13
+-	pop %r14
+-	pop %r15
++	POP_ALL
+ 
+ 	/*
+ 	 * upon vmx_depriv_vmexit_handler returning false, switch back to root
+-- 
+2.34.1
+

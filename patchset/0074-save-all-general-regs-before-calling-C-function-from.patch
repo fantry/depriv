@@ -1,0 +1,164 @@
+From 1f3c75e5cb31640531068de836ae8b398ae96c96 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 20 Jun 2020 23:56:32 -0700
+Subject: [PATCH 074/140] save all general regs before calling C function from
+ asm
+
+---
+ arch/x86/entry/entry_64.S       | 13 -------
+ arch/x86/kvm/vmx/depriv.c       |  6 ++--
+ arch/x86/kvm/vmx/depriv_entry.S | 64 ++++++++++++++++++++++++++++-----
+ 3 files changed, 59 insertions(+), 24 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 74c86394e170..21247bb246ea 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1415,19 +1415,6 @@ nmi_restore:
+ SYM_CODE_END(asm_exc_nmi)
+ 
+ SYM_CODE_START(depriv_continue_in_root_mode)
+-	/*
+-	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
+-	 */
+-	push	%rax
+-	mov	$1, %eax
+-	movl	%eax, 0x10(%rsp)
+-	pop	%rax
+-
+-	/*
+-	 * switch to iret stack, which is mapped even in user space CR3
+-	 */
+-	mov	0x10(%rsp), %rsp
+-
+ 	push	%rdx
+ 	push	%rcx
+ 	push	%rax
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 1fd92c6515c4..91ef51b87d22 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -841,7 +841,7 @@ void vmx_repriv_cpu(void *info)
+ /*
+  * sync guest state to host w/o changing guest state
+  */
+-static void vmx_repriv_cpu_state(void)
++void vmx_repriv_cpu_state(void)
+ {
+ 	vmx_repriv_cpu_crs();
+ 	vmx_repriv_cpu_misc();
+@@ -850,7 +850,7 @@ static void vmx_repriv_cpu_state(void)
+ }
+ 
+ #define DEPRIV_CONTINUE_IN_NON_ROOT_MODE(ins_len) do {				\
+-	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ins_len);				\
++	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(0);				\
+ 	vmcs_writel(GUEST_RIP, rip + ins_len);					\
+ 	cpumask_clear_cpu(cpu, &depriv_cpu_root_mode_mask);			\
+ 	return true;								\
+@@ -916,7 +916,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			     (unsigned int *)&regs[VCPU_REGS_RCX],
+ 			     (unsigned int *)&regs[VCPU_REGS_RDX]);
+ 
+-		if (test_handle_vmresume_failure && counter > 30000) {
++		if (test_handle_vmresume_failure && counter > 22000) {
+ 			pr_info("depriv: cpu%d (%ld) triggering vmresume fail\n",
+ 				cpu, counter);
+ 			vmcs_write32(CR3_TARGET_COUNT, 0x100000);
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index 164c53ec3a4e..79944f1749fd 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -6,6 +6,59 @@
+ 
+ 	.text
+ 
++SYM_CODE_START(vmx_depriv_continue_in_root_mode)
++	push %r15
++	push %r14
++	push %r13
++	push %r12
++	push %r11
++	push %r10
++	push %r9
++	push %r8
++	push %rdi
++	push %rsi
++	push %rbp
++	push %rsp
++	push %rbx
++	push %rdx
++	push %rcx
++	push %rax
++
++	/*
++	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
++	 */
++	mov	$1, %eax
++	movl	%eax, 0x88(%rsp)
++
++	call vmx_repriv_cpu_state
++	call vmx_depriv_set_root_mode_mask
++
++	pop %rax
++	pop %rcx
++	pop %rdx
++	pop %rbx
++	pop %r8
++	pop %rbp
++	pop %rsi
++	pop %rdi
++	pop %r8
++	pop %r9
++	pop %r10
++	pop %r11
++	pop %r12
++	pop %r13
++	pop %r14
++	pop %r15
++
++
++	/*
++	 * switch to iret stack, which is mapped even in user space CR3
++	 */
++	mov	0x10(%rsp), %rsp
++
++	jmp depriv_continue_in_root_mode
++SYM_CODE_END(vmx_depriv_continue_in_root_mode)
++
+ SYM_FUNC_START(vmx_depriv)
+ 	/* assuming vmlaunch will succeed */
+ 	xor %eax, %eax
+@@ -15,7 +68,7 @@ SYM_FUNC_START(vmx_depriv)
+ 	/* vmlaunch failed, switch to root mode stask */
+ 	mov %_ASM_ARG1, %rsp
+ 	mov $1, %eax
+-	jmp depriv_continue_in_root_mode
++	jmp vmx_depriv_continue_in_root_mode
+ SYM_FUNC_END(vmx_depriv)
+ 
+ /* vmlaunch succeeded */
+@@ -89,7 +142,7 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	 * upon vmx_depriv_vmexit_handler returning false, switch back to root
+ 	 * mode with guest stack
+ 	 */
+-	jne depriv_continue_in_root_mode
++	jne vmx_depriv_continue_in_root_mode
+ 
+ 	/*
+ 	 * upon vmx_depriv_vmexit_handler returning true, continue non-root mode
+@@ -99,10 +152,5 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	/*
+ 	 * VM resume failed, switch back to root mode with guest stack
+ 	 */
+-	push	%rax
+-	/* looks no other register will be clobbered? do save all someday */
+-	call vmx_depriv_set_root_mode_mask
+-	pop	%rax
+-
+-	jmp depriv_continue_in_root_mode
++	jmp vmx_depriv_continue_in_root_mode
+ SYM_FUNC_END(vmx_depriv_vmexit)
+-- 
+2.34.1
+

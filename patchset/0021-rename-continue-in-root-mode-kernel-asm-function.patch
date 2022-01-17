@@ -1,0 +1,96 @@
+From 77c580c2e0a389cc14a007ece173609a10587c4f Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 13 Jun 2020 20:08:56 -0700
+Subject: [PATCH 021/140] rename continue in root mode kernel asm function
+
+---
+ arch/x86/entry/entry_64.S       | 6 +++---
+ arch/x86/include/asm/vmx.h      | 2 +-
+ arch/x86/kvm/Kconfig            | 4 ++--
+ arch/x86/kvm/vmx/depriv_entry.S | 6 +++---
+ 4 files changed, 9 insertions(+), 9 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index a56f45f1d3e7..2d328db979d1 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1414,7 +1414,7 @@ nmi_restore:
+ 	iretq
+ SYM_CODE_END(asm_exc_nmi)
+ 
+-SYM_CODE_START(vmx_depriv_continue_in_root_mode)
++SYM_CODE_START(depriv_continue_in_root_mode)
+ 	push	%rax
+ 	push	%rcx
+ 	push	%rdx
+@@ -1437,8 +1437,8 @@ SYM_CODE_START(vmx_depriv_continue_in_root_mode)
+ 	pop	%rcx
+ 	pop	%rax
+ 	iretq
+-SYM_CODE_END(vmx_depriv_continue_in_root_mode)
+-EXPORT_SYMBOL(vmx_depriv_continue_in_root_mode)
++SYM_CODE_END(depriv_continue_in_root_mode)
++EXPORT_SYMBOL(depriv_continue_in_root_mode)
+ 
+ #ifndef CONFIG_IA32_EMULATION
+ /*
+diff --git a/arch/x86/include/asm/vmx.h b/arch/x86/include/asm/vmx.h
+index b9522d02e571..9b1d5bf35d7f 100644
+--- a/arch/x86/include/asm/vmx.h
++++ b/arch/x86/include/asm/vmx.h
+@@ -611,6 +611,6 @@ enum vmx_l1d_flush_state {
+ 
+ extern enum vmx_l1d_flush_state l1tf_vmx_mitigation;
+ 
+-extern asmlinkage void vmx_depriv_continue_in_root_mode(void);
++extern asmlinkage void depriv_continue_in_root_mode(void);
+ 
+ #endif
+diff --git a/arch/x86/kvm/Kconfig b/arch/x86/kvm/Kconfig
+index 533ba008322c..0c298e50befe 100644
+--- a/arch/x86/kvm/Kconfig
++++ b/arch/x86/kvm/Kconfig
+@@ -88,9 +88,9 @@ config KVM_INTEL
+ 
+ config KVM_INTEL_DEPRIV_HOST
+ 	tristate "KVM host deprivilege for Intel (and compatible) processors support"
+-	depends on KVM_INTEL
++	depends on X86_64 && KVM_INTEL
+ 	help
+-	  Provides support for KVM host deprivilege.
++	  Run kernel in VMX non-root mode.
+ 
+ 	  If unsure, say N.
+ 
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index 934d551364ca..65885a76cfb4 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -34,7 +34,7 @@ SYM_FUNC_START(vmx_depriv)
+ 	/* vmlaunch failed, switch to root mode stask */
+ 	mov %_ASM_ARG1, %rsp
+ 	mov $1, %eax
+-	jmp vmx_depriv_continue_in_root_mode
++	jmp depriv_continue_in_root_mode
+ SYM_FUNC_END(vmx_depriv)
+ 
+ /* vmlaunch succeeded */
+@@ -108,7 +108,7 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	 * upon vmx_depriv_vmexit_handler returning false, switch back to root
+ 	 * mode with guest stack
+ 	 */
+-	jne vmx_depriv_continue_in_root_mode
++	jne depriv_continue_in_root_mode
+ 
+ 	/*
+ 	 * upon vmx_depriv_vmexit_handler returning true, continue non-root mode
+@@ -118,5 +118,5 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	/*
+ 	 * VM resume failed, switch back to root mode with guest stack
+ 	 */
+-	jmp vmx_depriv_continue_in_root_mode
++	jmp depriv_continue_in_root_mode
+ SYM_FUNC_END(vmx_depriv_vmexit)
+-- 
+2.34.1
+

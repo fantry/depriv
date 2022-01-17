@@ -1,0 +1,40 @@
+From 071d966a64ead4e485931462770f75a79051f8d5 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 14 Jun 2020 03:14:06 -0700
+Subject: [PATCH 027/140] also save guest GS base MSR on VM exit
+
+---
+ arch/x86/kvm/vmx/depriv.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 36b5cd80eb34..0f8bef2b8df9 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1037,8 +1037,9 @@ static void __init vmx_depriv_cpu(void *info)
+ 	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+ 
+ 	msrs = (struct vmx_msrs *)host_cpu_state;
+-	msrs->nr = 1;
++	msrs->nr = 2;
+ 	msrs->val[0].index = MSR_FS_BASE;
++	msrs->val[1].index = MSR_GS_BASE;
+ 
+ 	vmcs_write32(VM_EXIT_MSR_STORE_COUNT, msrs->nr);
+ 	vmcs_write64(VM_EXIT_MSR_STORE_ADDR, __pa(msrs->val));
+@@ -1372,6 +1373,12 @@ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ 	if (base != last_base)
+ 		pr_info("depriv: cpu%d (%ld) exit reason %d GS base %#lx <= %#lx\n",
+ 			cpu, *cnt, reason, base, last_base);
++
++	if (msrs->val[1].value != base) {
++		pr_info("depriv: cpu%d (%ld) exit reason %d stored GS base %#llx <= %#lx\n",
++			cpu, *cnt, reason, msrs->val[1].value, base);
++		vmcs_writel(GUEST_GS_BASE, msrs->val[1].value);
++	}
+ }
+ 
+ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+-- 
+2.34.1
+

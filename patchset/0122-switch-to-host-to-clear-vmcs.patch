@@ -1,0 +1,200 @@
+From 399578e941c88b2b6864f808c2dad71d24543758 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 3 Oct 2020 19:28:32 -0700
+Subject: [PATCH 122/140] switch to host to clear vmcs
+
+---
+ arch/x86/depriv/vmx/depriv.c | 83 +++++++++++++++++++++++++-----------
+ kernel/pid_namespace.c       |  4 +-
+ 2 files changed, 61 insertions(+), 26 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 3f84c223bde6..1ff5c9554784 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -79,7 +79,7 @@ static bool volatile depriv_exiting = false;
+  */
+ static struct kmem_cache *loaded_vmcs_cache = NULL;
+ static DEFINE_PER_CPU(struct list_head, loaded_vmcss);
+-static DEFINE_PER_CPU(struct vmcs *, current_vmcs);
++static DEFINE_PER_CPU(struct depriv_loaded_vmcs *, active_loaded_vmcs);
+ 
+ static inline void vmclear_local_loaded_vmcss(void)
+ {
+@@ -94,7 +94,7 @@ static inline void vmclear_local_loaded_vmcss(void)
+ 		kmem_cache_free(loaded_vmcs_cache, v);
+ 	}
+ 
+-	per_cpu(current_vmcs, cpu) = NULL;
++	per_cpu(active_loaded_vmcs, cpu) = NULL;
+ }
+ 
+ static inline void __hardware_disable(void)
+@@ -247,8 +247,8 @@ static inline bool init_vmcs(struct pid_namespace *ns)
+ 
+ 	vmcs_load(vmcs);
+ 	indirect_branch_prediction_barrier();
++	per_cpu(active_loaded_vmcs, cpu) = loaded_vmcs;
+ 	vmcs_write64(VMCS_LINK_POINTER, ~0ull);
+-	per_cpu(current_vmcs, cpu) = vmcs;
+ 
+ 	host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+ 	vmcs_writel(HOST_CR3, __pa(host_cpu_state + DEPRIV_CPU_STATE_ROOT_PGD));
+@@ -320,6 +320,27 @@ static void vmx_depriv_cpu(void *info)
+ 	pr_err("depriv: cpu%d failed to deprivilege\n", cpu);
+ }
+ 
++#define VMX_VMCALL_REPRIV		0
++#define VMX_VMCALL_CLEAR_VMCS		1
++
++static inline void vmx_vmcall(int call_no, void *info)
++{
++	int cpu = raw_smp_processor_id();
++
++	asm_volatile_goto("1: vmcall\n\t"
++			  _ASM_EXTABLE(1b, %l[fault])
++			  : : "D" (call_no), "S" (info) : : fault);
++	return;
++
++fault:
++	pr_info("depriv: vmcall faulted, cpu%d already in root mode\n", cpu);
++
++	if (call_no == VMX_VMCALL_CLEAR_VMCS) {
++		vmcs_clear((struct vmcs *)info);
++		return;
++	}
++}
++
+ /*
+  * WARNING: must be called with interrupt disabled!
+  */
+@@ -330,13 +351,7 @@ static inline void __vmx_repriv(void)
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+ 		return;
+ 
+-	asm_volatile_goto("1: vmcall\n\t"
+-			  _ASM_EXTABLE(1b, %l[fault])
+-			  : : : : fault);
+-	return;
+-
+-fault:
+-	pr_info("depriv: vmcall faulted, cpu%d already in root mode\n", cpu);
++	vmx_vmcall(VMX_VMCALL_REPRIV, NULL);
+ }
+ 
+ static void vmx_repriv_cpu(void *info)
+@@ -428,17 +443,37 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		break;
+ 
+-	case EXIT_REASON_VMCALL:
++	case EXIT_REASON_VMCALL: {
++		int call_no = (int)regs[__VCPU_REGS_RDI];
++		void *info = (void *)regs[__VCPU_REGS_RSI];
++
+ 		pr_debug("depriv: cpu%d (%ld) exit reason: %d cpu depriv mode mask: %*pb[l]\n",
+ 			 cpu, counter, reason, cpumask_pr_args(&cpu_depriv_mode_mask));
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
+-		pr_debug("depriv: cpu%d (%ld) vmcall @ %#lx, switch to root mode\n",
+-			 cpu, counter, rip);
+-		vmcs_writel(GUEST_RIP, rip + insn_len);
+-		DEPRIV_SWITCH_TO_ROOT_MODE;
++		switch (call_no) {
++		case VMX_VMCALL_REPRIV:
++			pr_debug("depriv: cpu%d (%ld) vmcall @ %#lx, switch to root mode\n",
++				 cpu, counter, rip);
++			vmcs_writel(GUEST_RIP, rip + insn_len);
++			DEPRIV_SWITCH_TO_ROOT_MODE;
++			break;
++		case VMX_VMCALL_CLEAR_VMCS:
++			pr_info("depriv: cpu%d (%ld) vmcall to clear VMCS %p\n",
++				cpu, counter, info);
++			vmcs_clear((struct vmcs *)info);
++			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
++			break;
++		default:
++			pr_err("depriv: cpu%d (%ld) invalid vmcall no %d, switching to root mode\n",
++			       cpu, counter, call_no);
++			vmcs_writel(GUEST_RIP, rip + insn_len);
++			DEPRIV_SWITCH_TO_ROOT_MODE;
++			break;
++		}
+ 		break;
++	 }
+ 
+ 	default:
+ 		if (call_extra_exit_handlers && !vmx_depriv_handle(reason, regs, counter)) {
+@@ -491,10 +526,10 @@ static bool vmx_depriv(struct task_struct *next)
+ 
+ 		r = __vmx_depriv(true);
+ 	} else {
+-		if (per_cpu(current_vmcs, cpu) != vmcs) {
++		if (per_cpu(active_loaded_vmcs, cpu) != v) {
+ 			vmcs_load(vmcs);
+ 			indirect_branch_prediction_barrier();
+-			per_cpu(current_vmcs, cpu) = vmcs;
++			per_cpu(active_loaded_vmcs, cpu) = v;
+ 		}
+ 
+ 		vmx_depriv_cpu_segments();
+@@ -530,12 +565,12 @@ static void vmx_free_loaded_vmcs(void *info)
+ 
+ 	list_for_each_entry_safe(v, n, &per_cpu(loaded_vmcss, cpu),
+ 				 loaded_vmcss_on_cpu_link) {
+-		if (v->ns == ns) {
+-			pr_info("depriv: cpu%d freeing vmcs for namespace %p\n", cpu, ns);
+-			vmcs_clear(v->vmcs);
++		if (v->vmcs && v->ns == ns) {
++			pr_info("depriv: cpu%d clearing vmcs %p for namespace %p\n", cpu, v->vmcs, ns);
++			vmx_vmcall(VMX_VMCALL_CLEAR_VMCS, v->vmcs);
+ 			free_vmcs(v->vmcs);
+-			v->vmcs = NULL;
+-			v->ns = NULL;
++			list_del(&v->loaded_vmcss_on_cpu_link);
++			kmem_cache_free(loaded_vmcs_cache, v);
+ 			break;
+ 		}
+ 	}
+@@ -543,7 +578,8 @@ static void vmx_free_loaded_vmcs(void *info)
+ 
+ static void vmx_free_pidns_cb(struct pid_namespace *ns)
+ {
+-	on_each_cpu(vmx_free_loaded_vmcs, (void *)ns, 1);
++	if (ns)
++		on_each_cpu(vmx_free_loaded_vmcs, (void *)ns, 1);
+ }
+ 
+ extern struct depriv_ops depriv_ops;
+@@ -609,7 +645,6 @@ static int __init vmx_depriv_init(void)
+ 	depriv_ops.enter = vmx_depriv;
+ 	depriv_ops.exit = vmx_repriv;
+ 	depriv_ops.free_pidns_cb = vmx_free_pidns_cb;
+-	depriv_ops.free_pidns_cb = NULL;
+ 
+ 	register_reboot_notifier(&depriv_reboot_notifier);
+ 	pr_info("depriv: successfully initialized\n");
+diff --git a/kernel/pid_namespace.c b/kernel/pid_namespace.c
+index 8c799fd5c538..870a1e7a1ee4 100644
+--- a/kernel/pid_namespace.c
++++ b/kernel/pid_namespace.c
+@@ -129,13 +129,13 @@ static void delayed_free_pidns(struct rcu_head *p)
+ 	dec_pid_namespaces(ns->ucounts);
+ 	put_user_ns(ns->user_ns);
+ 
+-	depriv_free_pidns_callback(ns);
+-
+ 	kmem_cache_free(pid_ns_cachep, ns);
+ }
+ 
+ static void destroy_pid_namespace(struct pid_namespace *ns)
+ {
++	depriv_free_pidns_callback(ns);
++
+ 	ns_free_inum(&ns->ns);
+ 
+ 	idr_destroy(&ns->idr);
+-- 
+2.34.1
+

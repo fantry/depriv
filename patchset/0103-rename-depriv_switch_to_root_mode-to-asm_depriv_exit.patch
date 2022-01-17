@@ -1,0 +1,82 @@
+From ecbf9470446ac38fba502fba33ca8d8d109a3324 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 2 Sep 2020 22:29:02 -0700
+Subject: [PATCH 103/140] rename depriv_switch_to_root_mode to asm_depriv_exit
+
+---
+ arch/x86/entry/entry_64.S       | 6 +++---
+ arch/x86/kvm/vmx/depriv.c       | 6 +++---
+ arch/x86/kvm/vmx/depriv_entry.S | 2 +-
+ 3 files changed, 7 insertions(+), 7 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 564618ee19a6..74046a34e447 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1414,7 +1414,7 @@ nmi_restore:
+ 	iretq
+ SYM_CODE_END(asm_exc_nmi)
+ 
+-SYM_CODE_START(depriv_switch_to_root_mode)
++SYM_CODE_START(asm_depriv_exit)
+ 	testb	$3, 8(%rsp)
+ 	jz	1f
+ 
+@@ -1424,8 +1424,8 @@ SYM_CODE_START(depriv_switch_to_root_mode)
+ 
+ 1:	SWAPGS
+ 	INTERRUPT_RETURN
+-SYM_CODE_END(depriv_switch_to_root_mode)
+-EXPORT_SYMBOL(depriv_switch_to_root_mode)
++SYM_CODE_END(asm_depriv_exit)
++EXPORT_SYMBOL(asm_depriv_exit)
+ 
+ #ifndef CONFIG_IA32_EMULATION
+ /*
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index f5a3f824444d..e53d586d8754 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -857,7 +857,7 @@ void vmx_repriv_cpu(void *info)
+ 	DEPRIV_IRET_STACK_SS(base)	= vmcs_read16(GUEST_SS_SELECTOR);	\
+ } while (0)
+ 
+-void depriv_switch_to_root_mode(void);
++void asm_depriv_exit(void);
+ 
+ static void vmx_depriv_debug_with_non_root_mode(void)
+ {
+@@ -867,7 +867,7 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ 	u16 seg;
+ 	bool is_segment = true;
+ 
+-	vmcs_writel(GUEST_RIP, (unsigned long)depriv_switch_to_root_mode);
++	vmcs_writel(GUEST_RIP, (unsigned long)asm_depriv_exit);
+ 
+ 	seg = vmcs_read16(HOST_CS_SELECTOR);
+ 	vmcs_write16(GUEST_CS_SELECTOR, seg);
+@@ -926,7 +926,7 @@ bool vmx_repriv_cpu_state(void)
+ 
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(stack);
+ 
+-	/* prepare for swapgs in depriv_switch_to_root_mode */
++	/* prepare for swapgs in asm_depriv_exit */
+ 	wrmsrl(MSR_KERNEL_GS_BASE, vmcs_readl(GUEST_GS_BASE));
+ 
+ 	/* powerful switch to debug issues in non-root mode */
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index d93decf7e332..4ed035db686a 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -73,7 +73,7 @@ SYM_CODE_START(vmx_depriv_switch_to_root_mode)
+ 
+ 	POP_ALL
+ 
+-	je depriv_switch_to_root_mode
++	je asm_depriv_exit
+ 	vmresume
+ 	/* XXX what if vmresume fails? */
+ SYM_CODE_END(vmx_depriv_switch_to_root_mode)
+-- 
+2.34.1
+

@@ -1,0 +1,86 @@
+From c96e7511462ee63e08aa9ad9e465f0d082a1fad5 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 21 Jun 2020 11:05:49 -0700
+Subject: [PATCH 075/140] move root mode mask setting into vmx_repriv_cpu_state
+
+---
+ arch/x86/kvm/vmx/depriv.c       | 11 +++--------
+ arch/x86/kvm/vmx/depriv_entry.S | 12 +++++-------
+ 2 files changed, 8 insertions(+), 15 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 91ef51b87d22..7a1a8ae962c7 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -674,6 +674,8 @@ static void vmx_repriv_cpu_crs(void)
+ 	unsigned long cr0 = vmcs_readl(GUEST_CR0);
+ 	unsigned long cr4 = vmcs_readl(GUEST_CR4);
+ 
++	cpumask_set_cpu(cpu, &depriv_cpu_root_mode_mask);
++
+ 	if (host_cr0 != cr0) {
+ 		pr_info("depriv: repriv cpu%d cr0 %#lx : %#lx : %#lx\n",
+ 			cpu, host_cr0, vmcs_readl(HOST_CR0), cr0);
+@@ -850,14 +852,13 @@ void vmx_repriv_cpu_state(void)
+ }
+ 
+ #define DEPRIV_CONTINUE_IN_NON_ROOT_MODE(ins_len) do {				\
+-	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(0);				\
++	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ins_len);				\
+ 	vmcs_writel(GUEST_RIP, rip + ins_len);					\
+ 	cpumask_clear_cpu(cpu, &depriv_cpu_root_mode_mask);			\
+ 	return true;								\
+ } while (0)
+ 
+ #define DEPRIV_CONTINUE_IN_ROOT_MODE(ins_len) do {				\
+-	vmx_repriv_cpu_state();							\
+ 	pr_info("depriv: repriv cpu%d exit reason %d skip %d bytes instruction "\
+ 		"and continue in root mode\n",					\
+ 		cpu, reason, ins_len);						\
+@@ -957,12 +958,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	}
+ }
+ 
+-void vmx_depriv_set_root_mode_mask(void)
+-{
+-	int cpu = raw_smp_processor_id();
+-	cpumask_set_cpu(cpu, &depriv_cpu_root_mode_mask);
+-}
+-
+ static int depriv_task(void *unused)
+ {
+ 	depriv_task_cr3_pa = read_cr3_pa();
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index 79944f1749fd..f517fdce4750 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -24,14 +24,7 @@ SYM_CODE_START(vmx_depriv_continue_in_root_mode)
+ 	push %rcx
+ 	push %rax
+ 
+-	/*
+-	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
+-	 */
+-	mov	$1, %eax
+-	movl	%eax, 0x88(%rsp)
+-
+ 	call vmx_repriv_cpu_state
+-	call vmx_depriv_set_root_mode_mask
+ 
+ 	pop %rax
+ 	pop %rcx
+@@ -50,6 +43,11 @@ SYM_CODE_START(vmx_depriv_continue_in_root_mode)
+ 	pop %r14
+ 	pop %r15
+ 
++	/*
++	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
++	 */
++	mov	$1, %eax
++	movl	%eax, 0x8(%rsp)
+ 
+ 	/*
+ 	 * switch to iret stack, which is mapped even in user space CR3
+-- 
+2.34.1
+

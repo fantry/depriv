@@ -1,0 +1,25 @@
+From 430a673ee29f6c863e83d90c1d6438f556d08161 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 28 Apr 2021 13:14:39 -0700
+Subject: [PATCH 137/140] fix macro renaming
+
+---
+ arch/x86/depriv/vmx/handler.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/x86/depriv/vmx/handler.c b/arch/x86/depriv/vmx/handler.c
+index f5da083d7fa7..0e3207ad591a 100644
+--- a/arch/x86/depriv/vmx/handler.c
++++ b/arch/x86/depriv/vmx/handler.c
+@@ -360,7 +360,7 @@ static int handle_msr_write(unsigned long *regs, unsigned long cnt)
+ 	case MSR_KERNEL_GS_BASE:
+ 		pr_info("depriv: cpu%d (%ld) kernel GS base MSR = %#lx\n", cpu, cnt, val);
+ 		break;
+-	case MSR_IA32_TSCDEADLINE:
++	case MSR_IA32_TSC_DEADLINE:
+ 		pr_debug("depriv: cpu%d (%ld) TSC deadline timer MSR = %#lx\n", cpu, cnt, val);
+ 		break;
+ 	case 0x80b: // EOI virtualization MSR
+-- 
+2.34.1
+

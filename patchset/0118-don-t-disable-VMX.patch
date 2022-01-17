@@ -1,0 +1,32 @@
+From c56ae231021beea56e6a037e4dba29c8bf675e79 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 15 Sep 2020 20:15:43 -0700
+Subject: [PATCH 118/140] don't disable VMX
+
+---
+ arch/x86/depriv/vmx/depriv.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 1fea304ac372..d145ea5f1709 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -868,7 +868,6 @@ static void vmx_depriv_cpu(void *info)
+ 
+ error:
+ 	pr_err("depriv: cpu%d failed to deprivilege\n", cpu);
+-	//__hardware_disable();
+ }
+ 
+ static void vmx_repriv_cpu_crs(void)
+@@ -1175,7 +1174,6 @@ bool vmx_repriv_cpu_state(void)
+ 			"non-root GS base %#lx kernel GS base MSR %#lx (GS base MSR %#lx)\n",
+ 			cpu, vmcs_readl(GUEST_RIP), vmcs_readl(GUEST_RSP),
+ 			vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE), read_msr(MSR_GS_BASE));
+-		//__hardware_disable();
+ 	}
+ 
+ 	return true;
+-- 
+2.34.1
+

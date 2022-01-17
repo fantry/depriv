@@ -1,0 +1,128 @@
+From e8490a41f50a50af929248d53eaeabdc7c0e1a66 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 17 Oct 2021 09:47:35 -0700
+Subject: [PATCH 139/140] fix latest kconfig dependencies
+
+---
+ arch/x86/Kconfig        | 25 ++-----------------------
+ arch/x86/depriv/Kconfig | 12 ++++--------
+ arch/x86/kvm/Kconfig    | 21 +++++++++++++--------
+ 3 files changed, 19 insertions(+), 39 deletions(-)
+
+diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
+index 3f725cac8025..6fe6b58305c8 100644
+--- a/arch/x86/Kconfig
++++ b/arch/x86/Kconfig
+@@ -220,8 +220,8 @@ config X86
+ 	select HAVE_KPROBES_ON_FTRACE
+ 	select HAVE_FUNCTION_ERROR_INJECTION
+ 	select HAVE_KRETPROBES
+-	select HAVE_DEPRIV			if X86_64
+ 	select HAVE_KVM
++	select HAVE_DEPRIV			if X86_64
+ 	select HAVE_LIVEPATCH			if X86_64
+ 	select HAVE_MIXED_BREAKPOINTS_REGS
+ 	select HAVE_MOD_ARCH_SPECIFIC
+@@ -2883,29 +2883,8 @@ config HAVE_ATOMIC_IOMAP
+ 	def_bool y
+ 	depends on X86_32
+ 
+-source "drivers/firmware/Kconfig"
+-
+-source "virt/depriv/Kconfig"
+-
+-source "virt/kvm/Kconfig"
+-
+-menuconfig VIRTUALIZATION
+-	bool "Virtualization"
+-	depends on HAVE_DEPRIV || HAVE_KVM || X86
+-	default y
+-	help
+-	  Say Y here to get to see options for using your Linux host to run other
+-	  operating systems inside virtual machines (guests).
+-	  This option alone does not add any kernel code.
+-
+-	  If you say N, all options in this submenu will be skipped and disabled.
+-
+-if VIRTUALIZATION
+-
+-source "arch/x86/depriv/Kconfig"
+-
+ source "arch/x86/kvm/Kconfig"
+ 
+-endif # VIRTUALIZATION
++source "arch/x86/depriv/Kconfig"
+ 
+ source "arch/x86/Kconfig.assembler"
+diff --git a/arch/x86/depriv/Kconfig b/arch/x86/depriv/Kconfig
+index bd0f24de4d7e..03d453aa3dc6 100644
+--- a/arch/x86/depriv/Kconfig
++++ b/arch/x86/depriv/Kconfig
+@@ -3,6 +3,8 @@
+ # Depriv configuration
+ #
+ 
++source "virt/depriv/Kconfig"
++
+ if VIRTUALIZATION
+ 
+ config DEPRIV
+@@ -24,14 +26,8 @@ config DEPRIV_WERROR
+ 
+ config DEPRIV_INTEL
+ 	tristate "Deprivilege for Intel"
+-	depends on X86_64 && DEPRIV
+-	help
+-	  Run Linux in VMX non-root mode.
+-
+-config DEPRIV_AMD
+-	tristate "Deprivilege for AMD"
+-	depends on X86_64 && DEPRIV
++	depends on DEPRIV
+ 	help
+-	  Run Linux in AMD SVM.
++	  Run Linux kernel in VMX non-root mode when possible.
+ 
+ endif # VIRTUALIZATION
+diff --git a/arch/x86/kvm/Kconfig b/arch/x86/kvm/Kconfig
+index 331414ddf008..2b1548da00eb 100644
+--- a/arch/x86/kvm/Kconfig
++++ b/arch/x86/kvm/Kconfig
+@@ -3,6 +3,19 @@
+ # KVM configuration
+ #
+ 
++source "virt/kvm/Kconfig"
++
++menuconfig VIRTUALIZATION
++	bool "Virtualization"
++	depends on HAVE_KVM || X86
++	default y
++	help
++	  Say Y here to get to see options for using your Linux host to run other
++	  operating systems inside virtual machines (guests).
++	  This option alone does not add any kernel code.
++
++	  If you say N, all options in this submenu will be skipped and disabled.
++
+ if VIRTUALIZATION
+ 
+ config KVM
+@@ -73,14 +86,6 @@ config KVM_INTEL
+ 	  To compile this as a module, choose M here: the module
+ 	  will be called kvm-intel.
+ 
+-config KVM_INTEL_DEPRIV
+-	tristate "KVM host deprivilege for Intel"
+-	depends on X86_64 && KVM_INTEL
+-	help
+-	  Run kernel in VMX non-root mode.
+-
+-	  If unsure, say N.
+-
+ config X86_SGX_KVM
+ 	bool "Software Guard eXtensions (SGX) Virtualization"
+ 	depends on X86_SGX && KVM_INTEL
+-- 
+2.34.1
+

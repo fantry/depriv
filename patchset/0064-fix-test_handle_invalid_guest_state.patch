@@ -1,0 +1,30 @@
+From ea8791fd0d364a37912bef613a2bf9fd4c594b86 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 18 Jun 2020 22:44:20 -0700
+Subject: [PATCH 064/140] fix test_handle_invalid_guest_state
+
+---
+ arch/x86/kvm/vmx/depriv.c | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 5f2ff363cb28..36b3b1509f9b 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -627,11 +627,10 @@ static void vmx_depriv_cpu(void *info)
+ 	 * Should we save/restore general purpose registers around vmx_depriv?
+ 	 */
+ 	vmx_depriv_result = vmx_depriv(host_rsp);
+-	if (!vmx_depriv_result) {
++	atomic_inc(&depriv_cpu_count);
++	if (!vmx_depriv_result)
+ 		// continue in non-root mode...
+-		atomic_inc(&depriv_cpu_count);
+ 		return;
+-	}
+ 
+ 	// still in root mode
+ 	if (vmx_depriv_result == 1)
+-- 
+2.34.1
+

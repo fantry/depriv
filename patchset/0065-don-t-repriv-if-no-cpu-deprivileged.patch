@@ -1,0 +1,198 @@
+From 49723d96543bd7fb083bf8d2305daf55b069a093 Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Fri, 19 Jun 2020 12:22:53 -0700
+Subject: [PATCH 065/140] don't repriv if no cpu deprivileged
+
+---
+ arch/x86/kvm/vmx/depriv.c         | 22 +++++++++++++++-------
+ arch/x86/kvm/vmx/depriv_handler.c | 30 +++++++++++++-----------------
+ arch/x86/kvm/vmx/test_depriv.sh   | 12 ++++++++++++
+ 3 files changed, 40 insertions(+), 24 deletions(-)
+ create mode 100755 arch/x86/kvm/vmx/test_depriv.sh
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 36b3b1509f9b..c0f2e76f3962 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -843,6 +843,7 @@ static void vmx_repriv_cpu_state(void)
+ 	return false;								\
+ } while (0)
+ 
++extern void dump_guest_insn(unsigned long rip, int insn_len, char *insn);
+ extern int vmx_depriv_handle(u32 reason, unsigned long *regs, unsigned long cnt);
+ 
+ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+@@ -853,6 +854,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	unsigned long rsp = vmcs_readl(GUEST_RSP);
+ 	int cpu = smp_processor_id();
+ 	u32 reason = vmcs_read32(VM_EXIT_REASON), insn_len = 0;
++	char insn[64];
+ 
+ 	regs[VCPU_REGS_RSP] = rsp;
+ 
+@@ -885,8 +887,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			     (unsigned int *)&regs[VCPU_REGS_RDX]);
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-		pr_debug("depriv: cpu%d (%ld) executed cpuid and continue in non-root mode\n",
+-			 cpu, *cnt);
++		pr_debug("depriv: cpu%d (%ld) executed cpuid\n", cpu, *cnt);
+ 		DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 	}
+ 
+@@ -900,8 +901,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 				cpu, *cnt, rip);
+ 			DEPRIV_CONTINUE_IN_ROOT_MODE(insn_len);
+ 		} else {
+-			pr_debug("depriv: cpu%d (%ld) vmcall @ %#lx, continue in non-root mode\n",
+-				 cpu, *cnt, rip);
++			pr_debug("depriv: cpu%d (%ld) vmcall @ %#lx\n", cpu, *cnt, rip);
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+ 	}
+@@ -914,7 +914,9 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		}
+ 
+ 		/* continue in root mode */
+-		pr_info("depriv: cpu%d (%ld) exit reason=%#x\n", cpu, *cnt, reason);
++		dump_guest_insn(rip, vmcs_read32(VM_EXIT_INSTRUCTION_LEN), insn);
++		pr_info("depriv: cpu%d (%ld) exit reason: %#x rip: %#lx rsp: %#lx insn: %s\n",
++			cpu, *cnt, reason, rip, rsp, insn);
+ 		DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 	}
+ }
+@@ -941,8 +943,14 @@ void __init vmx_depriv_host(void)
+ 
+ void vmx_repriv_host(void)
+ {
+-	pr_info("depriv: %d cpus deprivileged, reprivileging...\n",
+-		atomic_read(&depriv_cpu_count));
++	int c = atomic_read(&depriv_cpu_count);
++
++	if (!c) {
++		pr_info("depriv: no cpus deprivileged");
++		return;
++	}
++
++	pr_info("depriv: %d cpus deprivileged, reprivileging...\n", c);
+ 	on_each_cpu(vmx_repriv_cpu, NULL, 0);
+ 
+ 	if (down_interruptible(&depriv_cpu_count_sema))
+diff --git a/arch/x86/kvm/vmx/depriv_handler.c b/arch/x86/kvm/vmx/depriv_handler.c
+index 240dca0bcd51..d9a9a1d5313f 100644
+--- a/arch/x86/kvm/vmx/depriv_handler.c
++++ b/arch/x86/kvm/vmx/depriv_handler.c
+@@ -1,6 +1,6 @@
+ // SPDX-License-Identifier: GPL-2.0-only
+ /*
+- * Deprivilege is to run Linux kernel in VMX non-root mode
++ * non-essential VM-exit handlers
+  *
+  * Authors:
+  * 	Xin Li <fantry@gmail.com>
+@@ -27,7 +27,7 @@
+  * valid in root mode, because it is mapped using non-root mode cr3 and page
+  * tables.
+  */
+-static void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
++void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ {
+ 	int i;
+ 
+@@ -135,15 +135,12 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 	if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
+ 		error_code = vmcs_read32(VM_EXIT_INTR_ERROR_CODE);
+ 
+-	pr_info("depriv: cpu%d (%ld) intr info: %#x error code %#x\n",
++	pr_info("depriv: cpu%d (%ld) intr info: %#x error code: %#x\n",
+ 		cpu, cnt, intr_info, error_code);
+ 
+ 	insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 	dump_guest_insn(rip, insn_len, insn);
+ 
+-	pr_info("depriv: cpu%d (%ld) hit exception %d @ rip %#lx insn: %s\n",
+-		cpu, cnt, vector, rip, insn);
+-
+ 	if (is_page_fault(intr_info)) {
+ 		unsigned long cr2 = vmcs_readl(EXIT_QUALIFICATION);
+ 		pr_info("depriv: cpu%d (%ld) page fault @ %#lx with error code %#x\n",
+@@ -156,9 +153,12 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 		pr_info("depriv: cpu%d (%ld) to handle machine check in root mode\n", cpu, cnt);
+ 	else if (is_machine_check(intr_info) || is_nmi(intr_info))
+ 		pr_info("depriv: cpu%d (%ld) to handle NMI in root mode\n", cpu, cnt);
++	else
++		pr_info("depriv: cpu%d (%ld) hit exception %d @ rip %#lx insn: %s\n",
++			cpu, cnt, vector, rip, insn);
+ 
+ 	if (continue_in_root_mode) {
+-		pr_info("depriv: cpu%d (%ld) hit exception %d, continue in root mode\n",
++		pr_info("depriv: cpu%d (%ld) switch to root mode to handle exception %d\n",
+ 			cpu, cnt, vector);
+ 		return 1;
+ 	}
+@@ -171,11 +171,10 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr);
+ 	vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, insn_len);
+ 	vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
+-	pr_info("depriv: cpu%d (%ld) injecting exception %d, continue in non-root mode\n",
+-		cpu, cnt, vector);
+-
++	pr_info("depriv: cpu%d (%ld) injecting exception %d\n", cpu, cnt, vector);
++#if 0
+ 	DEPRIV_DUMP_GPRS;
+-
++#endif
+ 	return 0;
+ }
+ 
+@@ -197,8 +196,7 @@ static int handle_cr_access(unsigned long *regs, unsigned long cnt)
+ 		break;
+ 	}
+ 
+-	pr_debug("depriv: cpu%d (%ld) accessed cr%d and continue in non-root mode\n",
+-		 cpu, cnt, cr);
++	pr_debug("depriv: cpu%d (%ld) accessed cr%d\n", cpu, cnt, cr);
+ 	return 0;
+ }
+ 
+@@ -226,8 +224,7 @@ static int handle_msr_read(unsigned long *regs, unsigned long cnt)
+ 	*((u32 *)&regs[VCPU_REGS_RAX]) = (u32)val;
+ 	*((u32 *)&regs[VCPU_REGS_RDX]) = (u32)(val >> 32);
+ 
+-	pr_info("depriv: cpu%d (%ld) executed rdmsr and continue in non-root mode\n",
+-		cpu, cnt);
++	pr_info("depriv: cpu%d (%ld) executed rdmsr\n", cpu, cnt);
+ 	return 0;
+ }
+ 
+@@ -299,8 +296,7 @@ static int handle_msr_write(unsigned long *regs, unsigned long cnt)
+ 			cpu, cnt, ecx, val);
+ 		return 1;
+ 	} else {
+-		pr_debug("depriv: cpu%d (%ld) executed wrmsr and continue in non-root mode\n",
+-			 cpu, cnt);
++		pr_debug("depriv: cpu%d (%ld) executed wrmsr\n", cpu, cnt);
+ 		return 0;
+ 	}
+ }
+diff --git a/arch/x86/kvm/vmx/test_depriv.sh b/arch/x86/kvm/vmx/test_depriv.sh
+new file mode 100755
+index 000000000000..3c1e951feac5
+--- /dev/null
++++ b/arch/x86/kvm/vmx/test_depriv.sh
+@@ -0,0 +1,12 @@
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_vmlaunch_failure=1
++sleep 1
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_invalid_guest_state=1
++sleep 1
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel call_extra_exit_handlers=0
++sleep 1
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel exception_bitmap=0x4000
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel exception_bitmap=0x2000
++sleep 1
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel intercept_msr=1
++sleep 1
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel
+-- 
+2.34.1
+

@@ -1,0 +1,449 @@
+From 1fc2c2c56b1271227f4753f89ddd669de4a7b79a Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 20 Oct 2020 12:22:21 -0700
+Subject: [PATCH 128/140] fix damn crash
+
+---
+ arch/x86/depriv/vmx/depriv.c                  | 97 +++++++++++--------
+ arch/x86/depriv/vmx/vmx.c                     |  6 +-
+ arch/x86/depriv/x86.c                         | 41 ++++++++
+ drivers/misc/smep_flipor.c                    | 12 +--
+ tools/testing/selftests/depriv/test_depriv.sh |  6 +-
+ 5 files changed, 113 insertions(+), 49 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 92592dd43975..e19eebbede84 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -20,6 +20,11 @@
+ MODULE_AUTHOR("Xin Li");
+ MODULE_LICENSE("GPL");
+ 
++#define VMX_VMCALL_FIRST	(0)
++#define VMX_VMCALL_REPRIV	VMX_VMCALL_FIRST
++#define VMX_VMCALL_CLEAR_VMCS	(VMX_VMCALL_FIRST + 1)
++#define VMX_VMCALL_LAST		VMX_VMCALL_CLEAR_VMCS
++
+ static bool __read_mostly test_early_invalid_state = 1;
+ module_param(test_early_invalid_state, bool, S_IRUGO);
+ 
+@@ -32,15 +37,12 @@ module_param(test_handle_invalid_guest_state, bool, S_IRUGO);
+ static bool __read_mostly call_extra_exit_handlers = 1;
+ module_param(call_extra_exit_handlers, bool, S_IRUGO);
+ 
+-static unsigned int __read_mostly log_mod = 10000;
++static unsigned int __read_mostly log_mod = 100000;
+ module_param(log_mod, uint, 0444);
+ 
+ static bool __read_mostly intercept_msr = 0;
+ module_param(intercept_msr, bool, S_IRUGO);
+ 
+-static bool __read_mostly log_deprivileging = 0;
+-module_param(log_deprivileging, bool, S_IRUGO);
+-
+ /*
+  * host state buffer page order is 2, meaning 4 pages will be allocated:
+  *	page 0: trampoline stack
+@@ -62,8 +64,9 @@ module_param(log_deprivileging, bool, S_IRUGO);
+ #define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(0 * 8)
+ #define DEPRIV_HOST_STACK_IRET_STACK		(1 * 8)
+ 
+-static struct cpumask cpu_vmx_operation_mask;
+ struct cpumask cpu_depriv_mode_mask;
++
++static struct cpumask cpu_vmx_operation_mask;
+ static bool volatile depriv_exiting = false;
+ static DEFINE_PER_CPU(struct vmcs *, current_vmcs);
+ 
+@@ -89,12 +92,9 @@ static inline void __hardware_disable(void)
+ 	__cpu_vmxoff();
+ 	cpumask_clear_cpu(cpu, &cpu_vmx_operation_mask);
+ 
+-	pr_info("depriv: VMX disabled on cpu%d\n", cpu);
++	pr_debug("depriv: VMX disabled on cpu%d\n", cpu);
+ }
+ 
+-/*
+- * this function must be executed in root mode.
+- */
+ static void vmx_repriv_cpu_release_resources(void *unused)
+ {
+ 	int cpu = raw_smp_processor_id();
+@@ -102,6 +102,12 @@ static void vmx_repriv_cpu_release_resources(void *unused)
+ 
+ 	BUG_ON(!arch_irqs_disabled());
+ 
++	/*
++	 * must be executed in root mode.
++	 */
++	if (cpumask_test_cpu(cpu, &cpu_depriv_mode_mask))
++		pr_err("depriv: cpu%d still in depriv mode\n", cpu);
++
+ 	__hardware_disable();
+ 
+ 	if (!host_cpu_state)
+@@ -110,7 +116,7 @@ static void vmx_repriv_cpu_release_resources(void *unused)
+ 	per_cpu(depriv_cpu_state, cpu) = NULL;
+ 	memset(host_cpu_state, 0, DEPRIV_CPU_STATE_BUFFER_SIZE);
+ 	free_pages((unsigned long)host_cpu_state, DEPRIV_CPU_STATE_PAGE_ORDER);
+-	pr_info("depriv: repriv cpu%d released cpu state buffer\n", cpu);
++	pr_debug("depriv: repriv cpu%d released cpu state buffer\n", cpu);
+ }
+ 
+ int asm_vmx_depriv(bool launch);
+@@ -136,15 +142,13 @@ static bool __vmx_depriv(bool launch)
+ 
+ 	vmcs_writel(GUEST_RFLAGS, arch_local_save_flags());
+ 
+-	if (log_deprivileging && launch)
++	if (launch)
+ 		pr_info("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n", cpu, rip, rsp);
+ 
+ 	/*
+ 	 * Should we save/restore general purpose registers around asm_vmx_depriv?
+ 	 */
+ 	depriv_result = asm_vmx_depriv(launch);
+-	if (log_deprivileging && launch)
+-		pr_info("depriv: cpu%d deprivilege result: %d\n", cpu, depriv_result);
+ 	switch (depriv_result) {
+ 	case 0: // switched to non-root mode
+ 		cpumask_set_cpu(cpu, &cpu_depriv_mode_mask);
+@@ -175,23 +179,17 @@ static inline int __hardware_enable(struct vmcs *vmcs)
+ 
+ 	pr_debug("depriv: enabling VMX on cpu%d\n", cpu);
+ 
+-	if (__read_cr4() & X86_CR4_VMXE) {
+-		pr_err("depriv: CR4.VMXE already set on cpu%d\n", cpu);
+-		return -EBUSY;
+-	}
+-
+ 	if (cpumask_test_cpu(cpu, &cpu_vmx_operation_mask)) {
+ 		pr_err("depriv: VMX operation already enabled on cpu%d\n", cpu);
+ 		return -EBUSY;
+ 	}
+ 
+-	memset(vmcs, 0, depriv_vmcs_config.size);
+ 	vmcs->hdr.revision_id = depriv_vmcs_config.revision_id;
+ 	r = __cpu_vmxon(__pa(vmcs));
+ 	if (r)
+ 		return r;
+ 
+-	pr_info("depriv: VMX enabled on cpu%d\n", cpu);
++	pr_debug("depriv: VMX enabled on cpu%d\n", cpu);
+ 	ept_sync_global();
+ 	cpumask_set_cpu(cpu, &cpu_vmx_operation_mask);
+ 	return 0;
+@@ -249,7 +247,7 @@ static void vmx_depriv_cpu(void *info)
+ 	per_cpu(current_vmcs, cpu) = NULL;
+ 
+ 	// memory for root mode VM exit handler
+-	page = __alloc_pages_node(cpu_to_node(cpu), GFP_KERNEL, DEPRIV_CPU_STATE_PAGE_ORDER);
++	page = __alloc_pages_node(cpu_to_node(cpu), GFP_ATOMIC, DEPRIV_CPU_STATE_PAGE_ORDER);
+ 	if (!page) {
+ 		pr_err("depriv: unable to allocate host state buffer for cpu%d\n", cpu);
+ 		goto error;
+@@ -293,11 +291,6 @@ static void vmx_depriv_cpu(void *info)
+ 	pr_err("depriv: cpu%d failed to deprivilege\n", cpu);
+ }
+ 
+-#define VMX_VMCALL_FIRST	(0)
+-#define VMX_VMCALL_REPRIV	VMX_VMCALL_FIRST
+-#define VMX_VMCALL_CLEAR_VMCS	(VMX_VMCALL_FIRST + 1)
+-#define VMX_VMCALL_LAST		VMX_VMCALL_CLEAR_VMCS
+-
+ static inline void vmx_vmcall(long call_no, void *info)
+ {
+ 	int cpu = raw_smp_processor_id();
+@@ -313,7 +306,7 @@ static inline void vmx_vmcall(long call_no, void *info)
+ 	return;
+ 
+ fault:
+-	pr_info("depriv: vmcall faulted, cpu%d already in root mode\n", cpu);
++	pr_err("depriv: cpu%d vmcall faulted, already in root mode\n", cpu);
+ 
+ 	if (call_no == VMX_VMCALL_CLEAR_VMCS) {
+ 		vmcs_clear(info);
+@@ -328,10 +321,15 @@ static inline void __vmx_repriv(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 
+-	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
++	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask)) {
++		pr_err("depriv: cpu%d NOT in vmx operation\n", cpu);
+ 		return;
++	}
+ 
+-	vmx_vmcall(VMX_VMCALL_REPRIV, NULL);
++	if (cpumask_test_cpu(cpu, &cpu_depriv_mode_mask))
++		vmx_vmcall(VMX_VMCALL_REPRIV, NULL);
++	else
++		pr_debug("depriv: cpu%d already in root mode\n", cpu);
+ }
+ 
+ static void vmx_repriv_cpu(void *info)
+@@ -349,7 +347,7 @@ static void vmx_repriv_cpu(void *info)
+ 	__vmx_repriv();
+ 
+ 	// switched to root mode
+-	pr_info("depriv: cpu%d reprivileged\n", cpu);
++	pr_debug("depriv: cpu%d reprivileged\n", cpu);
+ }
+ 
+ #define DEPRIV_CONTINUE_IN_NON_ROOT_MODE(ins_len) do {				\
+@@ -513,11 +511,11 @@ static bool vmx_depriv(struct task_struct *next)
+ 			vmcs_load(vmcs);
+ 			indirect_branch_prediction_barrier();
+ 			per_cpu(current_vmcs, cpu) = vmcs;
+-
+-			vmcs_writel(GUEST_CR3, __read_cr3());
+-			vmx_depriv_cpu_segments();
+ 		}
+ 
++		vmcs_writel(GUEST_CR3, __read_cr3());
++		vmx_depriv_cpu_segments();
++
+ 		r = __vmx_depriv(false);
+ 	} else {
+ 		if (!init_vmcs(ns))
+@@ -581,7 +579,9 @@ extern struct depriv_ops depriv_ops;
+ 
+ static void vmx_dump_context(unsigned long va)
+ {
+-	int cpu = raw_smp_processor_id();
++	int cpu;
++
++	cpu = raw_smp_processor_id();
+ 
+ 	if (!per_cpu(depriv_cpu_state, cpu))
+ 		return;
+@@ -593,13 +593,21 @@ static void vmx_dump_context(unsigned long va)
+ 
+ static void vmx_depriv_cleanup(void)
+ {
+-	on_each_cpu(vmx_repriv_cpu, NULL, 1);
+-
+ 	depriv_ops.enter = NULL;
+ 	depriv_ops.exit = NULL;
+ 	depriv_ops.on_destroy_pid_ns = NULL;
+ 	depriv_ops.dump_context = NULL;
+ 
++	pr_info("depriv: cpu vmx operation mask before repriv cpu: %*pb[l]\n",
++		cpumask_pr_args(&cpu_vmx_operation_mask));
++	pr_info("depriv: cpu depriv mode mask before repriv cpu: %*pb[l]\n",
++		cpumask_pr_args(&cpu_depriv_mode_mask));
++
++	on_each_cpu(vmx_repriv_cpu, NULL, 1);
++
++	pr_info("depriv: cpu depriv mode mask after repriv cpu: %*pb[l]\n",
++		cpumask_pr_args(&cpu_depriv_mode_mask));
++
+ 	on_each_cpu(vmx_repriv_cpu_release_resources, NULL, 1);
+ 
+ 	pr_info("depriv: successfully unloaded, cpu vmx operation mask: %*pb[l]\n",
+@@ -625,21 +633,30 @@ static struct notifier_block depriv_reboot_notifier = {
+ static int __init vmx_depriv_init(void)
+ {
+ 	int r = setup_vmcs_config();
++
+ 	if (r) {
+ 		pr_err("depriv: error setting up deprivilege VMCS config\n");
+ 		return r;
+ 	}
+ 
++	r = -EIO;
++
+ 	cpumask_clear(&cpu_vmx_operation_mask);
+ 	cpumask_clear(&cpu_depriv_mode_mask);
+ 	depriv_exiting = false;
+ 
+-	r = -EIO;
+-	pr_info("depriv: CPUs initializing\n");
++	pr_info("depriv: cpu vmx operation mask before depriv cpu: %*pb[l]\n",
++		cpumask_pr_args(&cpu_vmx_operation_mask));
++	pr_info("depriv: cpu depriv mode mask before depriv cpu: %*pb[l]\n",
++		cpumask_pr_args(&cpu_depriv_mode_mask));
++
+ 	on_each_cpu(vmx_depriv_cpu, (void *)read_cr3_pa(), 1);
+-	pr_info("depriv: all CPUs successfully initialized\n");
+ 
+-	pr_info("depriv: cpu vmx operation mask: %*pb[l]\n", cpumask_pr_args(&cpu_vmx_operation_mask));
++	pr_info("depriv: cpu depriv mode mask after depriv cpu: %*pb[l]\n",
++		cpumask_pr_args(&cpu_depriv_mode_mask));
++	pr_info("depriv: cpu vmx operation mask after depriv cpu: %*pb[l]\n",
++		cpumask_pr_args(&cpu_vmx_operation_mask));
++
+ 	if (cpumask_empty(&cpu_vmx_operation_mask))
+ 		return r;
+ 
+diff --git a/arch/x86/depriv/vmx/vmx.c b/arch/x86/depriv/vmx/vmx.c
+index e33d72c29ade..bc5026c329f4 100644
+--- a/arch/x86/depriv/vmx/vmx.c
++++ b/arch/x86/depriv/vmx/vmx.c
+@@ -55,7 +55,7 @@ inline struct vmcs *alloc_vmcs(void)
+ 	u64 *epte;
+ 	int i, nr_ept_pages = (1 << depriv_vmcs_config.order) - 1;
+ 
+-	pages = __alloc_pages_node(cpu_to_node(cpu), GFP_KERNEL, depriv_vmcs_config.order);
++	pages = __alloc_pages_node(cpu_to_node(cpu), GFP_ATOMIC, depriv_vmcs_config.order);
+ 	if (!pages)
+ 		return NULL;
+ 
+@@ -865,6 +865,8 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ 		vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE), read_msr(MSR_GS_BASE));
+ }
+ 
++extern struct cpumask cpu_depriv_mode_mask;
++
+ /*
+  * sync guest state to host w/o changing guest state
+  */
+@@ -875,6 +877,8 @@ bool vmx_repriv_cpu_state(void)
+ 	unsigned long cr3 = vmcs_readl(GUEST_CR3);
+ 	unsigned long trampoline_cr3_pa = cr3 & CR3_ADDR_MASK;
+ 
++	cpumask_clear_cpu(cpu, &cpu_depriv_mode_mask);
++
+ #ifdef CONFIG_PAGE_TABLE_ISOLATION
+ /*
+  * the following macros are from arch/x86/entry/calling.h
+diff --git a/arch/x86/depriv/x86.c b/arch/x86/depriv/x86.c
+index 31239d7c63a9..f67b6e08c5e0 100644
+--- a/arch/x86/depriv/x86.c
++++ b/arch/x86/depriv/x86.c
+@@ -10,6 +10,7 @@
+ 
+ #include <asm/depriv.h>
+ #include <asm/percpu.h>
++#include <asm/x86_vcpu_regs.h>
+ 
+ DEFINE_PER_CPU(void *, depriv_cpu_state) = NULL;
+ EXPORT_PER_CPU_SYMBOL(depriv_cpu_state);
+@@ -28,14 +29,54 @@ EXPORT_SYMBOL_GPL(depriv_ops);
+ void depriv_switch(struct task_struct *prev, struct task_struct *next)
+ {
+ 	int cpu = smp_processor_id();
++	unsigned long regs[16], rsp;
++
++	asm volatile("mov %%rsp,%0" : "=m" (regs[__VCPU_REGS_RSP]));
++
++	if (!next) {
++		pr_err("depriv: next is NULL\n");
++		return;
++	}
+ 
+ 	if (!per_cpu(depriv_cpu_state, cpu))
+ 		return;
+ 
++	asm volatile("mov %%rcx,%0" : "=m" (regs[__VCPU_REGS_RCX]));
++	asm volatile("mov %%rdx,%0" : "=m" (regs[__VCPU_REGS_RDX]));
++	asm volatile("mov %%rbx,%0" : "=m" (regs[__VCPU_REGS_RBX]));
++
++	asm volatile("mov %%r8,%0" : "=m" (regs[__VCPU_REGS_R8]));
++	asm volatile("mov %%r9,%0" : "=m" (regs[__VCPU_REGS_R9]));
++	asm volatile("mov %%r10,%0" : "=m" (regs[__VCPU_REGS_R10]));
++	asm volatile("mov %%r11,%0" : "=m" (regs[__VCPU_REGS_R11]));
++	asm volatile("mov %%r12,%0" : "=m" (regs[__VCPU_REGS_R12]));
++	asm volatile("mov %%r13,%0" : "=m" (regs[__VCPU_REGS_R13]));
++	asm volatile("mov %%r14,%0" : "=m" (regs[__VCPU_REGS_R14]));
++	asm volatile("mov %%r15,%0" : "=m" (regs[__VCPU_REGS_R15]));
++
+ 	if (depriv_ops.exit)
+ 		depriv_ops.exit();
+ 	if (depriv_ops.enter)
+ 		depriv_ops.enter(next);
++
++	asm volatile("mov %0,%%r15" : : "m" (regs[__VCPU_REGS_R15]));
++	asm volatile("mov %0,%%r14" : : "m" (regs[__VCPU_REGS_R14]));
++	asm volatile("mov %0,%%r13" : : "m" (regs[__VCPU_REGS_R13]));
++	asm volatile("mov %0,%%r12" : : "m" (regs[__VCPU_REGS_R12]));
++	asm volatile("mov %0,%%r11" : : "m" (regs[__VCPU_REGS_R11]));
++	asm volatile("mov %0,%%r10" : : "m" (regs[__VCPU_REGS_R10]));
++	asm volatile("mov %0,%%r9" : : "m" (regs[__VCPU_REGS_R9]));
++	asm volatile("mov %0,%%r8" : : "m" (regs[__VCPU_REGS_R8]));
++
++	asm volatile("mov %0,%%rbx" : : "m" (regs[__VCPU_REGS_RBX]));
++	asm volatile("mov %0,%%rdx" : : "m" (regs[__VCPU_REGS_RDX]));
++	asm volatile("mov %0,%%rcx" : : "m" (regs[__VCPU_REGS_RCX]));
++
++	asm volatile("mov %%rsp,%0" : "=m" (rsp));
++
++	if (rsp != regs[__VCPU_REGS_RSP])
++		pr_info("depriv: cpu%d rsp changed from %#lx to %#lx\n",
++			cpu, regs[__VCPU_REGS_RSP], rsp);
+ }
+ 
+ void on_destroy_pid_ns(struct pid_namespace *ns)
+diff --git a/drivers/misc/smep_flipor.c b/drivers/misc/smep_flipor.c
+index ec5e41b00817..b4558bf382ea 100644
+--- a/drivers/misc/smep_flipor.c
++++ b/drivers/misc/smep_flipor.c
+@@ -15,7 +15,7 @@ static void smep(bool enable)
+ 	unsigned long *pv = &val;
+ 
+ 	asm volatile("mov %%cr4,%0" : "=r" (val) : __FORCE_ORDER);
+-	printk(KERN_INFO "smep: cpu%d cr4: %#lx\n", cpu, val);
++	pr_info("smep: cpu%d cr4: %#lx\n", cpu, val);
+ 
+ 	if (enable)
+ 		val |= X86_CR4_SMEP;
+@@ -23,16 +23,16 @@ static void smep(bool enable)
+ 		val &= ~X86_CR4_SMEP;
+ 		target_cpu = cpu;
+ 	}
+-	printk(KERN_INFO "smep: cpu%d cr4 being set to %#lx\n", cpu, val);
++	pr_info("smep: cpu%d cr4 being set to %#lx\n", cpu, val);
+ 
+ 	asm volatile("mov %0,%%cr4" : : "r" (val) : "memory");
+ 
+ 	asm volatile("mov %%cr4,%0" : "=r" (val) : __FORCE_ORDER);
+-	printk(KERN_INFO "smep: cpu%d cr4 set to %#lx\n", cpu, val);
++	pr_info("smep: cpu%d cr4 set to %#lx\n", cpu, val);
+ 
+ 	asm volatile("mov %%rsp,%0" : "=m" (val));
+ 	for (cpu = 0; cpu < 8; cpu++)
+-		printk(KERN_INFO "smep: stack[%d]=%#lx\n", cpu, pv[cpu]);
++		pr_debug("smep: stack[%d]=%#lx\n", cpu, pv[cpu]);
+ }
+ 
+ static int __init smep_init(void)
+@@ -41,7 +41,7 @@ static int __init smep_init(void)
+ 	smep(false);
+ 	preempt_enable();
+ 
+-	printk(KERN_INFO "smep: smep driver loaded\n");
++	pr_info("smep: smep driver loaded\n");
+ 	return 0;
+ }
+ 
+@@ -53,7 +53,7 @@ static void smep_set(void *info)
+ static void __exit smep_exit(void)
+ {
+ 	smp_call_function_single(target_cpu, smep_set, NULL, 1);
+-	printk(KERN_INFO "smep: smep driver unloaded\n");
++	pr_info("smep: smep driver unloaded\n");
+ }
+ 
+ module_init(smep_init);
+diff --git a/tools/testing/selftests/depriv/test_depriv.sh b/tools/testing/selftests/depriv/test_depriv.sh
+index c89ebe274d44..0e9debc5b8cb 100755
+--- a/tools/testing/selftests/depriv/test_depriv.sh
++++ b/tools/testing/selftests/depriv/test_depriv.sh
+@@ -7,11 +7,13 @@ sudo modprobe -r depriv-intel && sudo modprobe depriv-intel exception_bitmap=0x2
+ sudo modprobe -r depriv-intel && sudo modprobe depriv-intel test_handle_invalid_host_state=1
+ sudo modprobe -r depriv-intel && sudo modprobe depriv-intel test_handle_invalid_guest_state=1
+ 
+-sudo modprobe -r depriv-intel && sudo modprobe depriv-intel test_early_invalid_state=0 test_handle_invalid_host_state=1 debug_host_in_non_root_mode=1 && make modules
+-sudo modprobe -r depriv-intel && sudo modprobe depriv-intel test_early_invalid_state=0 test_handle_invalid_guest_state=1 debug_host_in_non_root_mode=1 && make modules
++sudo modprobe -r depriv-intel && sudo modprobe depriv-intel test_early_invalid_state=0 test_handle_invalid_host_state=1 debug_host_in_non_root_mode=1 && make -j5 modules
++sudo modprobe -r depriv-intel && sudo modprobe depriv-intel test_early_invalid_state=0 test_handle_invalid_guest_state=1 debug_host_in_non_root_mode=1 && make -j5 modules
+ 
+ sudo modprobe -r depriv-intel && sudo modprobe depriv-intel call_extra_exit_handlers=0
+ sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
+ sudo modprobe -r depriv-intel && sudo modprobe depriv-intel
+ sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
+ sudo modprobe -r depriv-intel && sudo modprobe depriv-intel
++make -j5 modules
++sudo cp arch/x86/depriv/depriv-intel.ko /lib/modules/5.9.0+/kernel/arch/x86/depriv/
+-- 
+2.34.1
+

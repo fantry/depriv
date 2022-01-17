@@ -1,0 +1,265 @@
+From 8d16df53bf429cf0ae7e650c63fb98d0a9130e49 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 11 Jun 2020 15:13:24 -0700
+Subject: [PATCH 013/140] unable to make further progress on ESXi
+
+---
+ arch/x86/kvm/vmx/vmx.c | 126 ++++++++++++++++++++++++++---------------
+ 1 file changed, 79 insertions(+), 47 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index aeeec5b1f2d2..226183afab48 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8603,31 +8603,31 @@ static inline void vmx_repriv_cpu_segments(void)
+ 
+ 	ar = vmcs_read32(GUEST_FS_AR_BYTES);
+ 	if ((ar >> 16) & 0x1) {
+-		pr_info("depriv: cpu%d FS unusable\n", cpu);
++		pr_info("depriv: repriv cpu%d FS unusable\n", cpu);
+ 	} else {
+ 		sel = vmcs_read16(GUEST_FS_SELECTOR);
+ 		loadsegment(fs, sel);
+-		pr_info("depriv: cpu%d FS = %#x\n", cpu, sel);
++		pr_info("depriv: repriv cpu%d FS = %#x\n", cpu, sel);
+ 	}
+ 
+ 	host_base = read_msr(MSR_FS_BASE);
+ 	guest_base = vmcs_readl(GUEST_FS_BASE);
+-	pr_info("depriv: cpu%d FS base %#lx : %#lx\n",
++	pr_info("depriv: repriv cpu%d FS base %#lx : %#lx\n",
+ 		cpu, host_base, guest_base);
+ 
+ 	// never change GS BASE, which points to kernel mode per-CPU data
+ 	ar = vmcs_read32(GUEST_GS_AR_BYTES);
+ 	if ((ar >> 16) & 0x1) {
+-		pr_info("depriv: cpu%d GS unusable\n", cpu);
++		pr_info("depriv: repriv cpu%d GS unusable\n", cpu);
+ 	} else {
+ 		sel = vmcs_read16(GUEST_FS_SELECTOR);
+ 		load_gs_index(sel);
+-		pr_info("depriv: cpu%d FS %#x\n", cpu, sel);
++		pr_info("depriv: repriv cpu%d FS %#x\n", cpu, sel);
+ 	}
+ 
+ 	host_base = read_msr(MSR_GS_BASE);
+ 	guest_base = vmcs_readl(GUEST_GS_BASE);
+-	pr_info("depriv: cpu%d GS base %#lx : %#lx\n",
++	pr_info("depriv: repriv cpu%d GS base %#lx : %#lx\n",
+ 		cpu, host_base, guest_base);
+ }
+ 
+@@ -8638,7 +8638,7 @@ static inline void vmx_repriv_cpu_ldtr(void)
+ 
+ 	store_ldt(host_ldtr);
+ 	if (host_ldtr != guest_ldtr) {
+-		pr_info("depriv: cpu%d LDTR mismatch %#x : %#x\n",
++		pr_info("depriv: repriv cpu%d LDTR mismatch %#x : %#x\n",
+ 			cpu, host_ldtr, guest_ldtr);
+ 		load_ldt(guest_ldtr);
+ 	}
+@@ -8651,29 +8651,29 @@ static inline void vmx_repriv_cpu_tr(void)
+ 
+ 	store_tr(host_tr);
+ 	if (host_tr != guest_tr) {
+-		pr_info("depriv: cpu%d TR mismatch %#x : %#x\n",
++		pr_info("depriv: repriv cpu%d TR mismatch %#x : %#x\n",
+ 			cpu, host_tr, guest_tr);
+ 		if (guest_tr == 0)
+ 			return;
+ 		load_tr(guest_tr);
+-		//vmcs_write16(HOST_TR_SELECTOR, guest_tr);
+-	}
+-}
+-
+-#define REPRIV_DESC_TABLE(tag, TAG) do {					\
+-	store_##tag##dt(&host_dt);						\
+-	guest_dt_base = vmcs_readl(GUEST_##TAG##DTR_BASE);			\
+-	if (host_dt.address != guest_dt_base)					\
+-		pr_err("depriv: cpu%d " #tag "dt base mismatch %#lx : %#lx\n",	\
+-		       cpu, host_dt.address, guest_dt_base);			\
+-	vmcs_writel(HOST_##TAG##DTR_BASE, guest_dt_base);			\
+-	guest_dt_limit = vmcs_read32(GUEST_##TAG##DTR_LIMIT);			\
+-	if (host_dt.size != guest_dt_limit) {					\
+-		pr_debug("depriv: cpu%d " #tag "dt limit mismatch %#x : %#x\n",\
+-			 cpu, host_dt.size , guest_dt_limit);			\
+-		host_dt.size = guest_dt_limit;					\
+-		load_##tag##dt(&host_dt);					\
+-	}									\
++		vmcs_write16(HOST_TR_SELECTOR, guest_tr);
++	}
++}
++
++#define REPRIV_DESC_TABLE(tag, TAG) do {						\
++	store_##tag##dt(&host_dt);							\
++	guest_dt_base = vmcs_readl(GUEST_##TAG##DTR_BASE);				\
++	if (host_dt.address != guest_dt_base)						\
++		pr_err("depriv: repriv cpu%d " #tag "dt base mismatch %#lx : %#lx\n",	\
++		       cpu, host_dt.address, guest_dt_base);				\
++	vmcs_writel(HOST_##TAG##DTR_BASE, guest_dt_base);				\
++	guest_dt_limit = vmcs_read32(GUEST_##TAG##DTR_LIMIT);				\
++	if (host_dt.size != guest_dt_limit) {						\
++		pr_debug("depriv: repriv cpu%d " #tag "dt limit mismatch %#x : %#x\n",	\
++			 cpu, host_dt.size , guest_dt_limit);				\
++		host_dt.size = guest_dt_limit;						\
++		load_##tag##dt(&host_dt);						\
++	}										\
+ } while (0)
+ 
+ static inline void vmx_repriv_cpu_desc_tables(void)
+@@ -8793,15 +8793,39 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 	unsigned long guest_rsp = vmcs_readl(GUEST_RSP);
+ 	char insn[64];
+ 	u32 insn_len;
++	static unsigned long cnt = 0;
+ 	static bool enable_log = false;
+ 
+ 	guest_regs[__VCPU_REGS_RSP] = guest_rsp;
+ 
++	++cnt;
++
++#if 0
++	pr_info("depriv: cpu%d (%ld) upon VM-Exit FS base %#lx : %#lx : %#lx\n",
++		cpu, cnt, read_msr(MSR_FS_BASE),
++		vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
++
++	/*
++	 * the following fs base sync logic is confusing, but anyway it works
++	 * on VMWare ESXi and VMWare Fusion.
++	 */
++	fs_base = read_msr(MSR_FS_BASE);
++	vmcs_writel(GUEST_FS_BASE, fs_base);
++
++#endif
++
++#if 0
++	pr_info("depriv: cpu%d (%ld) upon VM-Exit GS base %#lx : %#lx : %#lx : %#lx\n",
++		cpu, cnt, read_msr(MSR_GS_BASE), vmcs_readl(HOST_GS_BASE),
++		vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
++#endif
+ 	pr_debug("depriv: cpu%d exit reason:%#x rip:%#lx rsp:%#lx\n",
+ 		 cpu, reason, guest_rip, guest_rsp);
+-	if (enable_log)
+-		pr_info("depriv: cpu%d exit reason:%#x rip:%#lx rsp:%#lx\n",
+-			cpu, reason, guest_rip, guest_rsp);
++	if (enable_log) {
++		pr_info("depriv: cpu%d (%ld) exit reason:%#x rip:%#lx rsp:%#lx\n",
++			cpu, cnt, reason, guest_rip, guest_rsp);
++		enable_log = false;
++	}
+ 
+ 	pr_debug("depriv: cpu%d host rsp:%#lx\n", cpu, host_rsp);
+ 
+@@ -8815,10 +8839,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 	switch (reason) {
+ 	case EXIT_REASON_EXCEPTION_NMI: {
+ 		bool continue_in_root_mode = true;
+-		/*
+-		 * u32 idt_vectoring_info = vmcs_read32(IDT_VECTORING_INFO_FIELD);
+-		 * pr_info("depriv: cpu%d vectoring info=%#x\n", idt_vectoring_info);
+-		 */
+ 		u32 intr_info = vmcs_read32(VM_EXIT_INTR_INFO);
+ 		u8 vector = intr_info & INTR_INFO_VECTOR_MASK;
+ 
+@@ -8835,7 +8855,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 				cpu, guest_rip, insn);
+ 		} else if (is_page_fault(intr_info)) {
+ 			unsigned long cr2 = vmcs_readl(EXIT_QUALIFICATION);
+-			unsigned long host_base, guest_base;
+ 			u32 intr, error_code = 0;
+ 
+ 			if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
+@@ -8844,18 +8863,16 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			pr_info("depriv: cpu%d page fault @ %#lx with error code %#x\n",
+ 				cpu, cr2, error_code);
+ 
+-			host_base = read_msr(MSR_FS_BASE);
+-			guest_base = vmcs_readl(GUEST_FS_BASE);
+-			pr_info("depriv: cpu%d FS base %#lx : %#lx\n",
+-				cpu, host_base, guest_base);
++			pr_info("depriv: cpu%d (%ld) FS base %#lx : %#lx : %#lx\n",
++				cpu, cnt, read_msr(MSR_FS_BASE),
++				vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
+ 
+-			host_base = read_msr(MSR_GS_BASE);
+-			guest_base = vmcs_readl(GUEST_GS_BASE);
+-			pr_info("depriv: cpu%d GS base %#lx : %#lx kernel GS base %#lx\n",
+-				cpu, host_base, guest_base, read_msr(MSR_KERNEL_GS_BASE));
++			pr_info("depriv: cpu%d (%ld) GS base %#lx : %#lx : %#lx : %#lx\n",
++				cpu, cnt, read_msr(MSR_GS_BASE), vmcs_readl(HOST_GS_BASE),
++				vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ 
+ 			intr = vector | INTR_INFO_VALID_MASK;
+-			intr |= INTR_TYPE_SOFT_INTR | INTR_INFO_DELIVER_CODE_MASK;
++			intr |= INTR_TYPE_HARD_EXCEPTION | INTR_INFO_DELIVER_CODE_MASK;
+ 			vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr);
+ 			vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, insn_len);
+ 			vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
+@@ -8863,6 +8880,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 				cpu, vector);
+ 
+ 			dump_vmcs();
++			vmx_check_guest_state();
+ 			enable_log = true;
+ 			continue_in_root_mode = false;
+ 		} else if (is_gp_fault(intr_info)) {
+@@ -8970,7 +8988,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
+ 		if (true) {
+-			pr_info("depriv: cpu%d vmcall: continue in non-root mode\n", cpu);
++			pr_info("depriv: cpu%d vmcall @ %#lx, continue in non-root mode\n",
++				cpu, guest_rip);
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+ 
+@@ -8992,7 +9011,11 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			pr_info("depriv: cpu%d msr[%#x]: %#llx failed\n", cpu, ecx, val);
+ 
+ 		pr_info("depriv: cpu%d msr[%#x]: %#llx\n", cpu, ecx, val);
+-
++#if 0
++		pr_info("depriv: cpu%d (%ld) FS base %#lx : %#lx : %#lx\n",
++			cpu, cnt, read_msr(MSR_FS_BASE),
++			vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
++#endif
+ 		if (ecx == 0x3b) {
+ 			cnt_0x3b++;
+ 			if (cnt_0x3b == 2) {
+@@ -9027,7 +9050,12 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			pr_debug("depriv: cpu%d speculation control msr = %#lx\n", cpu, val);
+ 			break;
+ 		case MSR_FS_BASE:
+-			pr_debug("depriv: cpu%d FS base MSR = %#lx\n", cpu, val);
++#if 0
++			pr_info("depriv: cpu%d (%ld) before write FS base %#lx : %#lx : %#lx\n",
++				cpu, cnt, read_msr(MSR_FS_BASE),
++				vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
++#endif
++			//pr_info("depriv: cpu%d FS base MSR = %#lx\n", cpu, val);
+ 			/*
+ 			 * guest FS base needs to be syned up with MSR_FS_BASE, thus we will
+ 			 * have correct FS base value in non-root mode after all future VM-entries.
+@@ -9038,6 +9066,11 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			 * have correct FS base value in root mode after all future VM-exits.
+ 			 */
+ 			vmcs_writel(HOST_FS_BASE, val);
++#if 0
++			pr_info("depriv: cpu%d (%ld) after write FS base %#lx : %#lx : %#lx\n",
++				cpu, cnt, read_msr(MSR_FS_BASE),
++				vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
++#endif
+ 			break;
+ 		case MSR_GS_BASE:
+ 			pr_info("depriv: cpu%d GS base MSR = %#lx\n", cpu, val);
+@@ -9413,7 +9446,6 @@ void vmx_check_guest_state(void)
+ 	CHECK(vmcs_read32(CR3_TARGET_COUNT) == 0);
+ 
+ 	CHECK(!(cpu_based_exec_ctrl & CPU_BASED_USE_IO_BITMAPS));
+-	CHECK(cpu_based_exec_ctrl & CPU_BASED_USE_MSR_BITMAPS);
+ 	CHECK(!(cpu_based_exec_ctrl & CPU_BASED_TPR_SHADOW));
+ 	CHECK(pin_based_exec_ctrl & PIN_BASED_NMI_EXITING ||
+ 	      !(pin_based_exec_ctrl & PIN_BASED_VIRTUAL_NMIS));
+-- 
+2.34.1
+

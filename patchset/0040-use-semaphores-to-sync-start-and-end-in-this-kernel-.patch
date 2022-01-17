@@ -1,0 +1,125 @@
+From f6da939ae65581925e3c818c4e216bd788017e24 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 13:05:48 -0700
+Subject: [PATCH 040/140] use semaphores to sync start and end in this kernel
+ module init and exit time
+
+---
+ arch/x86/kvm/vmx/depriv.c | 48 +++++++++++++++++++++++----------------
+ 1 file changed, 28 insertions(+), 20 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 56a8e070fd70..ff5ada334de1 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -6,9 +6,10 @@
+  * 	Xin Li <fantry@gmail.com>
+  */
+ 
++#include <linux/semaphore.h>
+ #include <linux/kvm_host.h>
+-#include <linux/delay.h>
+ 
++#include <asm/atomic.h>
+ #include <asm/debugreg.h>
+ #include <asm/insn.h>
+ 
+@@ -53,10 +54,11 @@ module_param(depriv_print_mod, uint, 0444);
+ #define DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE	(9 * 8)
+ 
+ static struct vmcs_config depriv_vmcs_conf;
+-static struct task_struct *depriv_task;
++static struct semaphore depriv_task_start_sema;
++static struct semaphore depriv_task_end_sema;
+ static unsigned long depriv_task_cr3_pa;
+-static volatile bool depriv_task_started;
+-static volatile unsigned int depriv_cpu_count;
++static atomic_t depriv_cpu_count;
++static struct semaphore depriv_cpu_count_sema;
+ 
+ static DEFINE_PER_CPU(struct vmcs *, depriv_vmcs);
+ static DEFINE_PER_CPU(void *, depriv_cpu_state);
+@@ -957,7 +959,8 @@ static void vmx_repriv_cpu_release_resources(void)
+ 		pr_info("depriv: repriv cpu%d released root mode VMCS\n", cpu);
+ 	}
+ 
+-	--depriv_cpu_count;
++	if (atomic_dec_and_test(&depriv_cpu_count))
++		up(&depriv_cpu_count_sema);
+ }
+ 
+ void vmx_depriv_vmexit(void);
+@@ -1148,7 +1151,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 		pr_info("depriv: cpu%d deprivileged: rsp=%#lx  rflags=%#lx\n",
+ 			cpu, rsp, rflags);
+ 
+-		++depriv_cpu_count;
++		atomic_inc(&depriv_cpu_count);
+ 
+ 		*to_root_mode = false;
+ 		fs_base = read_msr(MSR_FS_BASE);
+@@ -1346,15 +1349,15 @@ static void vmx_repriv_cpu(void *info)
+ 
+ void vmx_repriv_host(void)
+ {
+-	pr_info("depriv: %d cpus deprivileged\n", depriv_cpu_count);
++	pr_info("depriv: %d cpus deprivileged\n", atomic_read(&depriv_cpu_count));
+ 
+ 	on_each_cpu(vmx_repriv_cpu, NULL, 0);
+ 
+-	while (depriv_cpu_count) {
+-		ssleep(1);
+-	}
++	if (down_interruptible(&depriv_cpu_count_sema))
++		pr_err("depriv: reprivileging interrupted\n");
++
++	up(&depriv_task_end_sema);
+ 
+-	kthread_stop(depriv_task);
+ 	pr_info("depriv: reprivileged host\n");
+ }
+ 
+@@ -1808,14 +1811,15 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ static int depriv_thread_fn(void *unused)
+ {
+ 	depriv_task_cr3_pa = read_cr3_pa();
+-	pr_info("depriv: task cr3: %lx\n", depriv_task_cr3_pa);
+ 
+-	depriv_task_started = true;
++	up(&depriv_task_start_sema);
+ 
+-	while (!kthread_should_stop()) {
+-		ssleep(1);
+-	}
++	pr_info("depriv: depriv task cr3: %lx\n", depriv_task_cr3_pa);
+ 
++	if (down_interruptible(&depriv_task_end_sema))
++		pr_err("depriv: depriv task interrupted\n");
++
++	pr_info("depriv: depriv task exiting\n");
+ 	return 1;
+ }
+ 
+@@ -1826,11 +1830,15 @@ void __init vmx_depriv_host(void)
+ 		return;
+ 	}
+ 
+-	depriv_task = kthread_run(depriv_thread_fn, NULL, "depriv_task");
++	sema_init(&depriv_task_start_sema, 0);
++	sema_init(&depriv_task_end_sema, 0);
++	sema_init(&depriv_cpu_count_sema, 0);
++
++	kthread_run(depriv_thread_fn, NULL, "depriv_task");
+ 
+-	if (!depriv_task_started) {
+-		pr_info("depriv: wait for depriv task to start\n");
+-		ssleep(1);
++	if (down_interruptible(&depriv_task_start_sema)) {
++		pr_info("depriv: depriv task not started yet\n");
++		return;
+ 	}
+ 
+ 	on_each_cpu(vmx_depriv_cpu, NULL, 0);
+-- 
+2.34.1
+

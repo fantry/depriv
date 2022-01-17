@@ -1,0 +1,119 @@
+From 2413042de5552a06de23a63b9df90469d473e146 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Fri, 11 Sep 2020 23:47:17 -0700
+Subject: [PATCH 113/140] fix debug in non-root mode
+
+---
+ arch/x86/depriv/vmx/depriv.c | 47 ++++++++++++++++++++++++++++--------
+ 1 file changed, 37 insertions(+), 10 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index bf1ead29786c..9953f83d34e3 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -70,6 +70,7 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ 
+ #define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(0 * 8)
+ #define DEPRIV_HOST_STACK_IRET_STACK		(1 * 8)
++#define DEPRIV_HOST_STACK_CONTEXT_SWITCH	(2 * 8)
+ 
+ #define DEPRIV_IRET_STACK_GUEST_RIP		(0 * 8)
+ #define DEPRIV_IRET_STACK_GUEST_CS		(1 * 8)
+@@ -1016,17 +1017,26 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ static void vmx_repriv(void)
+ {
+ 	int cpu = raw_smp_processor_id();
++	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
++	unsigned long root_mode_rsp = (unsigned long)host_cpu_state + PAGE_SIZE
++					- DEPRIV_HOST_STACK_RESERVED_BYTES;
++	bool *in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH);
++
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+ 		return;
+ 
++	*in_depriv_switch = true;
+ 	asm_volatile_goto("1: vmcall\n\t"
+ 			  _ASM_EXTABLE(1b, %l[fault])
+ 			  : : : : fault);
++	*in_depriv_switch = false;
++
+ 	return;
+ 
+ fault:
+ 	// vmcall faulted, was in root mode already
+ 	vmx_repriv_cpu_release_resources();
++	*in_depriv_switch = false;
+ }
+ 
+ static void vmx_repriv_cpu(void *info)
+@@ -1104,7 +1114,7 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ bool vmx_repriv_cpu_state(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	unsigned long stack = depriv_iret_trampoline_stack(cpu), rsp;
++	unsigned long stack = depriv_iret_trampoline_stack(cpu);
+ 	unsigned long cr3 = vmcs_readl(GUEST_CR3);
+ 	unsigned long trampoline_cr3_pa = cr3 & CR3_ADDR_MASK;
+ 
+@@ -1131,10 +1141,6 @@ bool vmx_repriv_cpu_state(void)
+ 	vmx_repriv_cpu_sysenter_msrs();
+ 	vmx_repriv_cpu_desc_tables();
+ 
+-	asm volatile("mov %%rsp,%0" : "=m"(rsp));
+-	pr_debug("depriv: cpu%d current rsp %#lx CS selector %x in %s\n",
+-		 cpu, rsp, vmcs_read16(GUEST_CS_SELECTOR), __FUNCTION__);
+-
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(stack);
+ 
+ 	/* prepare for swapgs in asm_depriv_exit */
+@@ -1142,10 +1148,22 @@ bool vmx_repriv_cpu_state(void)
+ 
+ 	/* powerful switch to debug issues in non-root mode */
+ 	if (debug_host_in_non_root_mode) {
+-		vmx_depriv_debug_with_non_root_mode();
+-	        if (debug_host_in_non_root_mode++ == 10)
+-			debug_host_in_non_root_mode = 0;
+-		return false;
++		void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
++		unsigned long root_mode_rsp = (unsigned long)host_cpu_state + PAGE_SIZE
++						- DEPRIV_HOST_STACK_RESERVED_BYTES;
++		bool in_depriv_switch = *((bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH));
++
++		if (!in_depriv_switch) {
++			unsigned long rsp;
++			asm volatile("mov %%rsp,%0" : "=m"(rsp));
++			pr_info("depriv: cpu%d current rsp %#lx CS selector %x in %s\n",
++				cpu, rsp, vmcs_read16(GUEST_CS_SELECTOR), __FUNCTION__);
++
++			vmx_depriv_debug_with_non_root_mode();
++			if (debug_host_in_non_root_mode++ == 10)
++				debug_host_in_non_root_mode = 0;
++			return false;
++		}
+ 	}
+ 
+ 	if (depriv_exiting) {
+@@ -1263,10 +1281,19 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ static bool vmx_depriv(void)
+ {
+ 	int cpu = raw_smp_processor_id();
++	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
++	unsigned long root_mode_rsp = (unsigned long)host_cpu_state + PAGE_SIZE
++					- DEPRIV_HOST_STACK_RESERVED_BYTES;
++	bool *in_depriv_switch = (bool *)(root_mode_rsp + DEPRIV_HOST_STACK_CONTEXT_SWITCH), r;
++
+ 	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+ 		return false;
+ 
+-	return __vmx_depriv(false);
++	*in_depriv_switch = true;
++	r = __vmx_depriv(false);
++	*in_depriv_switch = false;
++
++	return r;
+ }
+ 
+ static int __init vmx_depriv_init(void)
+-- 
+2.34.1
+

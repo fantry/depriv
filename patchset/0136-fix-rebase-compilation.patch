@@ -1,0 +1,24 @@
+From dd830e379e195e32613c17a09b669e97f94427eb Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 27 Apr 2021 14:48:18 -0700
+Subject: [PATCH 136/140] fix rebase compilation
+
+---
+ arch/x86/kernel/cpu/common.c | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+index 514aaa3c82b5..5c3d63e17e46 100644
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -1807,6 +1807,7 @@ struct depriv_ops depriv_ops = {
+ 	.exit = NULL,
+ };
+ EXPORT_SYMBOL_GPL(depriv_ops);
++#endif
+ 
+ /* May not be marked __init: used by software suspend */
+ void syscall_init(void)
+-- 
+2.34.1
+

@@ -1,0 +1,104 @@
+From f504a77a28570f391ecdd05dc50e872bc8bf4ab1 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 17:06:27 -0700
+Subject: [PATCH 042/140] don't have to change base kernel for returning to
+ root mode
+
+---
+ arch/x86/entry/entry_64.S       | 29 -----------------------------
+ arch/x86/kvm/vmx/depriv_entry.S | 32 ++++++++++++++++++++++++++++++++
+ 2 files changed, 32 insertions(+), 29 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 6a0b0784a45c..466df3e50276 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1414,35 +1414,6 @@ nmi_restore:
+ 	iretq
+ SYM_CODE_END(asm_exc_nmi)
+ 
+-SYM_CODE_START(depriv_continue_in_root_mode)
+-	push	%rdx
+-	push	%rcx
+-	push	%rax
+-
+-	/*
+-	 * switch to guest CR3
+-	 */
+-	mov	0x40(%rsp), %rax
+-	mov	%rax, %cr3
+-
+-	/*
+-	 * set to guest GS base
+-	 */
+-	movl	$MSR_GS_BASE, %ecx
+-	movl	0x48(%rsp), %eax
+-	movl	0x4c(%rsp), %edx
+-	wrmsr
+-
+-	mov	$1, %eax
+-	movl	%eax, 0x60(%rsp)
+-
+-	pop	%rax
+-	pop	%rcx
+-	pop	%rdx
+-	iretq
+-SYM_CODE_END(depriv_continue_in_root_mode)
+-EXPORT_SYMBOL(depriv_continue_in_root_mode)
+-
+ #ifndef CONFIG_IA32_EMULATION
+ /*
+  * This handles SYSCALL from 32-bit code.  There is no way to program
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index 65885a76cfb4..28d2c7afdbb6 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -2,6 +2,7 @@
+ #include <linux/linkage.h>
+ #include <asm/asm.h>
+ #include <asm/kvm_vcpu_regs.h>
++#include <asm/msr-index.h>
+ 
+ #define WORD_SIZE (BITS_PER_LONG / 8)
+ 
+@@ -25,6 +26,37 @@
+ 
+ 	.text
+ 
++SYM_CODE_START(depriv_continue_in_root_mode)
++	push	%rdx
++	push	%rcx
++	push	%rax
++
++	/*
++	 * switch to guest CR3
++	 */
++	mov	0x40(%rsp), %rax
++	mov	%rax, %cr3
++
++	/*
++	 * set to guest GS base
++	 */
++	movl	$MSR_GS_BASE, %ecx
++	movl	0x48(%rsp), %eax
++	movl	0x4c(%rsp), %edx
++	wrmsr
++
++	/*
++	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
++	 */
++	mov	$1, %eax
++	movl	%eax, 0x60(%rsp)
++
++	pop	%rax
++	pop	%rcx
++	pop	%rdx
++	iretq
++SYM_CODE_END(depriv_continue_in_root_mode)
++
+ SYM_FUNC_START(vmx_depriv)
+ 	/* assuming vmlaunch will succeed */
+ 	xor %eax, %eax
+-- 
+2.34.1
+

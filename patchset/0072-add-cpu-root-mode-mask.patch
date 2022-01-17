@@ -1,0 +1,186 @@
+From 587d794c49df65ebe710a2d17cbca64dc11c72dc Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 20 Jun 2020 20:32:29 -0700
+Subject: [PATCH 072/140] add cpu root mode mask
+
+---
+ arch/x86/entry/entry_64.S       | 32 +++++++++++++++++++++++++++++
+ arch/x86/kvm/vmx/depriv.c       | 23 +++++++++++++++++++--
+ arch/x86/kvm/vmx/depriv_entry.S | 36 +++++----------------------------
+ 3 files changed, 58 insertions(+), 33 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 466df3e50276..0722116ce2b4 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1414,6 +1414,38 @@ nmi_restore:
+ 	iretq
+ SYM_CODE_END(asm_exc_nmi)
+ 
++SYM_CODE_START(depriv_continue_in_root_mode)
++	push	%rdx
++	push	%rcx
++	push	%rax
++
++	/*
++	 * switch to guest CR3
++	 */
++	mov	0x40(%rsp), %rax
++	mov	%rax, %cr3
++
++	/*
++	 * set to guest GS base
++	 */
++	movl	$MSR_GS_BASE, %ecx
++	movl	0x48(%rsp), %eax
++	movl	0x4c(%rsp), %edx
++	wrmsr
++
++	/*
++	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
++	 */
++	mov	$1, %eax
++	movl	%eax, 0x60(%rsp)
++
++	pop	%rax
++	pop	%rcx
++	pop	%rdx
++	iretq
++SYM_CODE_END(depriv_continue_in_root_mode)
++EXPORT_SYMBOL(depriv_continue_in_root_mode)
++
+ #ifndef CONFIG_IA32_EMULATION
+ /*
+  * This handles SYSCALL from 32-bit code.  There is no way to program
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 21fbede57b01..cb30b918a93f 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -24,6 +24,9 @@ module_param(test_handle_vmlaunch_failure, bool, S_IRUGO);
+ static bool __read_mostly test_handle_invalid_guest_state = 0;
+ module_param(test_handle_invalid_guest_state, bool, S_IRUGO);
+ 
++static bool __read_mostly test_handle_vmresume_failure = 0;
++module_param(test_handle_vmresume_failure, bool, S_IRUGO);
++
+ static bool __read_mostly call_extra_exit_handlers = 1;
+ module_param(call_extra_exit_handlers, bool, S_IRUGO);
+ 
+@@ -66,6 +69,7 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ 
+ static struct vmcs_config depriv_vmcs_conf;
+ static unsigned long depriv_task_cr3_pa;
++struct cpumask depriv_cpu_root_mode_mask;
+ static struct semaphore depriv_cpu_count_sema;
+ static atomic_t depriv_cpu_count;
+ 
+@@ -839,6 +843,7 @@ static void vmx_repriv_cpu_state(void)
+ #define DEPRIV_CONTINUE_IN_NON_ROOT_MODE(ins_len) do {				\
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ins_len);				\
+ 	vmcs_writel(GUEST_RIP, rip + ins_len);					\
++	cpumask_clear_cpu(cpu, &depriv_cpu_root_mode_mask);			\
+ 	return true;								\
+ } while (0)
+ 
+@@ -865,6 +870,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	u32 reason = vmcs_read32(VM_EXIT_REASON), insn_len = 0;
+ 	char insn[64];
+ 
++	cpumask_set_cpu(cpu, &depriv_cpu_root_mode_mask);
++
+ 	regs[VCPU_REGS_RSP] = rsp;
+ 
+ 	(*cnt)++;
+@@ -883,8 +890,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	}
+ 
+ 	if (!(counter % log_mod))
+-		pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx\n",
+-			cpu, counter, reason, rip, rsp);
++		pr_info("depriv: cpu%d (%ld) exit reason: %d cpu mask: %*pb[l]\n",
++			cpu, counter, reason, cpumask_pr_args(&depriv_cpu_root_mode_mask));
+ 
+ 	switch (reason) {
+ 	case EXIT_REASON_CPUID: {
+@@ -897,6 +904,12 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			     (unsigned int *)&regs[VCPU_REGS_RCX],
+ 			     (unsigned int *)&regs[VCPU_REGS_RDX]);
+ 
++		if (test_handle_vmresume_failure && counter > 30000) {
++			pr_info("depriv: cpu%d (%ld) triggering vmresume fail\n",
++				cpu, counter);
++			vmcs_write32(CR3_TARGET_COUNT, 0x100000);
++		}
++
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 		pr_debug("depriv: cpu%d (%ld) executed cpuid\n", cpu, counter);
+ 		DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+@@ -932,6 +945,12 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	}
+ }
+ 
++void vmx_depriv_set_root_mode_mask(void)
++{
++	int cpu = raw_smp_processor_id();
++	cpumask_set_cpu(cpu, &depriv_cpu_root_mode_mask);
++}
++
+ static int depriv_task(void *unused)
+ {
+ 	depriv_task_cr3_pa = read_cr3_pa();
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index 5c04fe40f775..164c53ec3a4e 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -6,37 +6,6 @@
+ 
+ 	.text
+ 
+-SYM_CODE_START(depriv_continue_in_root_mode)
+-	push	%rdx
+-	push	%rcx
+-	push	%rax
+-
+-	/*
+-	 * switch to guest CR3
+-	 */
+-	mov	0x40(%rsp), %rax
+-	mov	%rax, %cr3
+-
+-	/*
+-	 * set to guest GS base
+-	 */
+-	movl	$MSR_GS_BASE, %ecx
+-	movl	0x48(%rsp), %eax
+-	movl	0x4c(%rsp), %edx
+-	wrmsr
+-
+-	/*
+-	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
+-	 */
+-	mov	$1, %eax
+-	movl	%eax, 0x60(%rsp)
+-
+-	pop	%rax
+-	pop	%rcx
+-	pop	%rdx
+-	iretq
+-SYM_CODE_END(depriv_continue_in_root_mode)
+-
+ SYM_FUNC_START(vmx_depriv)
+ 	/* assuming vmlaunch will succeed */
+ 	xor %eax, %eax
+@@ -130,5 +99,10 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	/*
+ 	 * VM resume failed, switch back to root mode with guest stack
+ 	 */
++	push	%rax
++	/* looks no other register will be clobbered? do save all someday */
++	call vmx_depriv_set_root_mode_mask
++	pop	%rax
++
+ 	jmp depriv_continue_in_root_mode
+ SYM_FUNC_END(vmx_depriv_vmexit)
+-- 
+2.34.1
+

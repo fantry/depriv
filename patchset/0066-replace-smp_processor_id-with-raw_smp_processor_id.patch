@@ -1,0 +1,237 @@
+From 129d978275b02a8ed6fbf30b75f649279a68f9d5 Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Fri, 19 Jun 2020 16:16:33 -0700
+Subject: [PATCH 066/140] replace smp_processor_id with raw_smp_processor_id
+
+---
+ arch/x86/kvm/vmx/depriv.c         | 30 +++++++++++++++---------------
+ arch/x86/kvm/vmx/depriv_handler.c | 12 ++++++------
+ arch/x86/kvm/vmx/test_depriv.sh   | 19 +++++++++----------
+ 3 files changed, 30 insertions(+), 31 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index c0f2e76f3962..aa2c377d668b 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -267,7 +267,7 @@ static inline u32 get_desc_limit_in_byte(struct desc_struct *dentry)
+ 
+ static inline void dump_desc_entry(struct desc_struct *dentry)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	bool is_16byte = is_desc_16byte(dentry);
+ 	u16 *entry = (u16 *)dentry;
+ 	u32 limit = get_desc_limit_in_byte(dentry);
+@@ -300,7 +300,7 @@ static inline struct desc_struct *get_gdt_entry(unsigned long addr)
+ static inline u32 get_desc_ar(struct desc_struct *dentry,
+ 			      bool is_null, bool is_segment)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	u32 unusable = is_null ? 1 : 0; // 0 = usable; 1 = unusable
+ 	/*
+ 	 * 26.3.1.2 Checks on Guest Segment Registers, AR bytes:
+@@ -342,7 +342,7 @@ static inline u32 get_desc_ar(struct desc_struct *dentry,
+ 
+ static void vmx_depriv_cpu_segments(unsigned long gdt_base)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	struct desc_struct *dentry;
+ 	unsigned long base;
+ 	bool is_segment = true;
+@@ -367,7 +367,7 @@ static void vmx_depriv_cpu_segments(unsigned long gdt_base)
+ 
+ static void vmx_depriv_cpu_ldtr(unsigned long gdt_base)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	struct desc_struct *dentry;
+ 	unsigned long base;
+ 	u16 ldtr;
+@@ -379,7 +379,7 @@ static void vmx_depriv_cpu_ldtr(unsigned long gdt_base)
+ 
+ static void vmx_depriv_cpu_tr(unsigned long gdt_base)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	struct desc_struct *dentry;
+ 	unsigned long base, tss_base;
+ 	u16 tr;
+@@ -409,7 +409,7 @@ static void vmx_depriv_cpu_tr(unsigned long gdt_base)
+ 
+ static void vmx_depriv_cpu_desc_tables(void)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	struct desc_ptr gdt, idt;
+ 	unsigned long gdt_base;
+ 
+@@ -482,7 +482,7 @@ static void vmx_depriv_cpu_state(void)
+  */
+ static void vmx_repriv_cpu_release_resources(void)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+ 	struct vmcs *vmcs = per_cpu(depriv_vmcs, cpu);
+ 
+@@ -541,7 +541,7 @@ extern void vmx_validate_guest_state(void);
+ 
+ static void vmx_depriv_cpu(void *info)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	int node = cpu_to_node(cpu);
+ 	struct vmcs *vmcs = NULL;
+ 	struct page *page = NULL;
+@@ -647,7 +647,7 @@ static void vmx_depriv_cpu(void *info)
+ 
+ static void vmx_repriv_cpu_crs(void)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	unsigned long host_cr0 = read_cr0();
+ 	unsigned long host_cr4 = __read_cr4();
+ 	unsigned long cr0 = vmcs_readl(GUEST_CR0);
+@@ -692,7 +692,7 @@ static inline void vmx_repriv_cpu_misc(void)
+ 
+ static inline void vmx_repriv_cpu_segments(void)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	unsigned long host_base, base;
+ 	u32 ar;
+ 	u16 sel;
+@@ -732,7 +732,7 @@ static inline void vmx_repriv_cpu_segments(void)
+ 
+ static inline void vmx_repriv_cpu_ldtr(void)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	u16 ldtr = vmcs_read16(GUEST_LDTR_SELECTOR), host_ldtr;
+ 
+ 	store_ldt(host_ldtr);
+@@ -745,7 +745,7 @@ static inline void vmx_repriv_cpu_ldtr(void)
+ 
+ static inline void vmx_repriv_cpu_tr(void)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	u16 tr = vmcs_read16(GUEST_TR_SELECTOR), host_tr;
+ 
+ 	store_tr(host_tr);
+@@ -777,7 +777,7 @@ static inline void vmx_repriv_cpu_tr(void)
+ 
+ static inline void vmx_repriv_cpu_desc_tables(void)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	struct desc_ptr host_dt;
+ 	unsigned long dt_base;
+ 	u32 dt_limit;
+@@ -792,7 +792,7 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ 
+ void vmx_repriv_cpu(void *info)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+ 	int *to_root_mode = NULL;
+ 
+@@ -852,7 +852,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
+ 	unsigned long rip = vmcs_readl(GUEST_RIP);
+ 	unsigned long rsp = vmcs_readl(GUEST_RSP);
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	u32 reason = vmcs_read32(VM_EXIT_REASON), insn_len = 0;
+ 	char insn[64];
+ 
+diff --git a/arch/x86/kvm/vmx/depriv_handler.c b/arch/x86/kvm/vmx/depriv_handler.c
+index d9a9a1d5313f..9c4a4e91461e 100644
+--- a/arch/x86/kvm/vmx/depriv_handler.c
++++ b/arch/x86/kvm/vmx/depriv_handler.c
+@@ -47,7 +47,7 @@ void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ 
+ static void handle_cr3_access(unsigned long *regs, unsigned long cnt)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	unsigned long qualification = vmcs_readl(EXIT_QUALIFICATION);
+ 	int reg = (qualification >> 8) & 0xf;
+ 
+@@ -83,7 +83,7 @@ static void handle_cr3_access(unsigned long *regs, unsigned long cnt)
+ 
+ static void handle_cr4_access(unsigned long *regs, unsigned long cnt)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	unsigned long qualification = vmcs_readl(EXIT_QUALIFICATION);
+ 	int reg = (qualification >> 8) & 0xf;
+ 
+@@ -123,7 +123,7 @@ static void handle_cr4_access(unsigned long *regs, unsigned long cnt)
+ 
+ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	unsigned long rip = vmcs_readl(GUEST_RIP);
+ 	char insn[64];
+ 	u32 insn_len = 0;
+@@ -180,7 +180,7 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 
+ static int handle_cr_access(unsigned long *regs, unsigned long cnt)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	unsigned long qualification = vmcs_readl(EXIT_QUALIFICATION);
+ 	int cr = qualification & 0xf;
+ 
+@@ -202,7 +202,7 @@ static int handle_cr_access(unsigned long *regs, unsigned long cnt)
+ 
+ static int handle_msr_read(unsigned long *regs, unsigned long cnt)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	u32 ecx = (u32)regs[VCPU_REGS_RCX];
+ 	unsigned long val;
+ 
+@@ -230,7 +230,7 @@ static int handle_msr_read(unsigned long *regs, unsigned long cnt)
+ 
+ static int handle_msr_write(unsigned long *regs, unsigned long cnt)
+ {
+-	int cpu = smp_processor_id();
++	int cpu = raw_smp_processor_id();
+ 	bool continue_in_root_mode = false;
+ 	u32 ecx = (u32)regs[VCPU_REGS_RCX];
+ 	unsigned long val = (unsigned long)(u32)regs[VCPU_REGS_RAX] |
+diff --git a/arch/x86/kvm/vmx/test_depriv.sh b/arch/x86/kvm/vmx/test_depriv.sh
+index 3c1e951feac5..35f1d3ed836e 100755
+--- a/arch/x86/kvm/vmx/test_depriv.sh
++++ b/arch/x86/kvm/vmx/test_depriv.sh
+@@ -1,12 +1,11 @@
+-sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_vmlaunch_failure=1
+-sleep 1
+-sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_invalid_guest_state=1
+-sleep 1
+-sudo modprobe -r kvm-intel && sudo modprobe kvm-intel call_extra_exit_handlers=0
+-sleep 1
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel intercept_msr=1
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel exception_bitmap=0x4000
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel exception_bitmap=0x2000
+-sleep 1
+-sudo modprobe -r kvm-intel && sudo modprobe kvm-intel intercept_msr=1
+-sleep 1
+-sudo modprobe -r kvm-intel && sudo modprobe kvm-intel
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_vmlaunch_failure=1
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_invalid_guest_state=1
++
++#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel call_extra_exit_handlers=0
++#sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
++#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel
++#sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
++#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel
+-- 
+2.34.1
+

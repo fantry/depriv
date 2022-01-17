@@ -1,0 +1,30 @@
+From 5652e11df8f0143daa474f3a796d54c8fe6c5b02 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Fri, 19 Jun 2020 22:57:41 -0700
+Subject: [PATCH 068/140] enable SMEP tests w/ and w/o cr4 exit handler
+
+---
+ arch/x86/kvm/vmx/test_depriv.sh | 10 +++++-----
+ 1 file changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/test_depriv.sh b/arch/x86/kvm/vmx/test_depriv.sh
+index 35f1d3ed836e..cb60d0c17f35 100755
+--- a/arch/x86/kvm/vmx/test_depriv.sh
++++ b/arch/x86/kvm/vmx/test_depriv.sh
+@@ -4,8 +4,8 @@ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel exception_bitmap=0x2000
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_vmlaunch_failure=1
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_invalid_guest_state=1
+ 
+-#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel call_extra_exit_handlers=0
+-#sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
+-#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel
+-#sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
+-#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel call_extra_exit_handlers=0
++sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel
++sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel
+-- 
+2.34.1
+

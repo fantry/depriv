@@ -1,0 +1,25 @@
+From ba966b6be434e6329586420a282e324f0306f874 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 10 Jun 2020 15:13:57 -0700
+Subject: [PATCH 008/140] fix a typo
+
+---
+ arch/x86/kvm/vmx/vmx.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 35271a42c445..c22f04c2c048 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -9068,7 +9068,7 @@ static int __init setup_depriv_vmcs_config(void)
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_STORE_EXITING) {
+ 		// if EPT is available, it's OK to disable this control
+ 		_cpu_based_exec_control &= ~CPU_BASED_CR3_STORE_EXITING;
+-		pr_info("depriv: disabled cr3 restore exiting\n");
++		pr_info("depriv: disabled cr3 store exiting\n");
+ 	}
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_INVLPG_EXITING) {
+-- 
+2.34.1
+

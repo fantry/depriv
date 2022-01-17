@@ -1,0 +1,161 @@
+From 1f0439a3e3f35eba67341ca9cb8d951b5223ddde Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 14 Jun 2020 12:58:16 -0700
+Subject: [PATCH 028/140] put msrs auto save logic into functions
+
+---
+ arch/x86/kvm/vmx/depriv.c | 79 ++++++++++++++++++++++++++-------------
+ 1 file changed, 52 insertions(+), 27 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 0f8bef2b8df9..e5b421b83924 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -977,6 +977,22 @@ static void vmx_depriv_cpu_intercept_msr(u32 msr, bool enable)
+ 		       cpu, orig_msr);
+ }
+ 
++static void vmx_depriv_cpu_autosave_msrs(struct vmx_msrs *msrs)
++{
++	if (!msrs)
++		return;
++
++	msrs->nr = 2;
++
++	if (msrs->nr > 0)
++		msrs->val[0].index = MSR_FS_BASE;
++	if (msrs->nr > 1)
++		msrs->val[1].index = MSR_GS_BASE;
++
++	vmcs_write32(VM_EXIT_MSR_STORE_COUNT, msrs->nr);
++	vmcs_write64(VM_EXIT_MSR_STORE_ADDR, __pa(msrs->val));
++}
++
+ #define DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ip_off) do {			\
+ 	*(unsigned long *)(host_rsp + 0x0) = rip + (ip_off);			\
+ 	*(unsigned long *)(host_rsp + 0x8) = vmcs_read16(GUEST_CS_SELECTOR);	\
+@@ -996,7 +1012,6 @@ static void __init vmx_depriv_cpu(void *info)
+ 	struct page *page = NULL;
+ 	void *host_cpu_state = NULL;
+ 	void *msr_bitmap = NULL;
+-	struct vmx_msrs *msrs = NULL;
+ 	unsigned long host_rsp, rip, rsp, rflags;
+ 	int vmx_depriv_result;
+ 
+@@ -1030,19 +1045,13 @@ static void __init vmx_depriv_cpu(void *info)
+ 
+ 	// last page of host state
+ 	msr_bitmap = host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
+-	memset(msr_bitmap, 0xff, PAGE_SIZE);
+-	vmx_depriv_cpu_intercept_msr(MSR_FS_BASE, true);
+-	vmx_depriv_cpu_intercept_msr(MSR_GS_BASE, true);
+-	vmx_depriv_cpu_intercept_msr(MSR_KERNEL_GS_BASE, true);
++	memset(msr_bitmap, 0, PAGE_SIZE);
++	//vmx_depriv_cpu_intercept_msr(MSR_FS_BASE, true);
++	//vmx_depriv_cpu_intercept_msr(MSR_GS_BASE, true);
++	//vmx_depriv_cpu_intercept_msr(MSR_KERNEL_GS_BASE, true);
+ 	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+ 
+-	msrs = (struct vmx_msrs *)host_cpu_state;
+-	msrs->nr = 2;
+-	msrs->val[0].index = MSR_FS_BASE;
+-	msrs->val[1].index = MSR_GS_BASE;
+-
+-	vmcs_write32(VM_EXIT_MSR_STORE_COUNT, msrs->nr);
+-	vmcs_write64(VM_EXIT_MSR_STORE_ADDR, __pa(msrs->val));
++	vmx_depriv_cpu_autosave_msrs(host_cpu_state);
+ 
+ 	vmx_depriv_cpu_state();
+ 
+@@ -1346,6 +1355,34 @@ static void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ 	insn[3 * i] = '\0';
+ }
+ 
++static void vmx_depriv_cpu_sync_fsgs_base(unsigned long host_rsp, u32 reason)
++{
++	unsigned long *cnt = (unsigned long *)(host_rsp + 0x40);
++	int cpu = smp_processor_id();
++	struct vmx_msrs *msrs = (struct vmx_msrs *)per_cpu(depriv_cpu_state, cpu);
++	unsigned long base;
++
++	if (msrs->nr < 1)
++		return;
++
++	base = vmcs_readl(GUEST_FS_BASE);
++	if (msrs->val[0].value != base) {
++		pr_info("depriv: cpu%d (%ld) exit reason %d stored FS base %#llx <= %#lx\n",
++			cpu, *cnt, reason, msrs->val[0].value, base);
++		vmcs_writel(GUEST_FS_BASE, msrs->val[0].value);
++	}
++
++	if (msrs->nr < 2)
++		return;
++
++	base = vmcs_readl(GUEST_GS_BASE);
++	if (msrs->val[1].value != base) {
++		pr_info("depriv: cpu%d (%ld) exit reason %d stored GS base %#llx <= %#lx\n",
++			cpu, *cnt, reason, msrs->val[1].value, base);
++		vmcs_writel(GUEST_GS_BASE, msrs->val[1].value);
++	}
++}
++
+ /*
+  * the following fs base sync logic is confusing, but it happens on nested
+  */
+@@ -1354,7 +1391,6 @@ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ 	unsigned long *cnt = (unsigned long *)(host_rsp + 0x40);
+ 	int cpu = smp_processor_id();
+ 	unsigned long base, last_base;
+-	struct vmx_msrs *msrs = (struct vmx_msrs *)per_cpu(depriv_cpu_state, cpu);
+ 
+ 	base = vmcs_readl(GUEST_FS_BASE);
+ 	last_base = *(unsigned long *)(host_rsp + 0x38);
+@@ -1362,23 +1398,11 @@ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ 		pr_info("depriv: cpu%d (%ld) exit reason %d FS base %#lx <= %#lx\n",
+ 			cpu, *cnt, reason, base, last_base);
+ 
+-	if (msrs->val[0].value != base) {
+-		pr_info("depriv: cpu%d (%ld) exit reason %d stored FS base %#llx <= %#lx\n",
+-			cpu, *cnt, reason, msrs->val[0].value, base);
+-		vmcs_writel(GUEST_FS_BASE, msrs->val[0].value);
+-	}
+-
+ 	base = vmcs_readl(GUEST_GS_BASE);
+ 	last_base = *(unsigned long *)(host_rsp + 0x30);
+ 	if (base != last_base)
+ 		pr_info("depriv: cpu%d (%ld) exit reason %d GS base %#lx <= %#lx\n",
+ 			cpu, *cnt, reason, base, last_base);
+-
+-	if (msrs->val[1].value != base) {
+-		pr_info("depriv: cpu%d (%ld) exit reason %d stored GS base %#llx <= %#lx\n",
+-			cpu, *cnt, reason, msrs->val[1].value, base);
+-		vmcs_writel(GUEST_GS_BASE, msrs->val[1].value);
+-	}
+ }
+ 
+ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+@@ -1409,6 +1433,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	(*cnt)++;
+ 
+ 	dump_fsgs_base(host_rsp, reason);
++	vmx_depriv_cpu_sync_fsgs_base(host_rsp, reason);
+ 
+ 	pr_debug("depriv: cpu%d exit reason:%#x rip:%#lx rsp:%#lx\n",
+ 		 cpu, reason, rip, rsp);
+@@ -1636,11 +1661,11 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		switch (ecx) {
+ 		case MSR_IA32_SPEC_CTRL:
+ 			pr_debug("depriv: cpu%d speculation control MSR = %#lx\n", cpu, val);
+-			vmx_depriv_cpu_intercept_msr(MSR_IA32_PRED_CMD, true);
++			vmx_depriv_cpu_intercept_msr(MSR_IA32_PRED_CMD, false);
+ 			break;
+ 		case MSR_IA32_PRED_CMD:
+ 			pr_debug("depriv: cpu%d prediction command MSR = %#lx\n", cpu, val);
+-			vmx_depriv_cpu_intercept_msr(MSR_IA32_PRED_CMD, true);
++			vmx_depriv_cpu_intercept_msr(MSR_IA32_PRED_CMD, false);
+ 			break;
+ 		case MSR_FS_BASE:
+ #if 0
+-- 
+2.34.1
+

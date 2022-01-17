@@ -1,0 +1,160 @@
+From b35b517917be83f4608118398f672dcaf2f23e99 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 20 Jun 2020 22:50:44 -0700
+Subject: [PATCH 073/140] use NMI stack during switching back to root mode
+
+---
+ arch/x86/entry/entry_64.S | 19 ++++++++++-----
+ arch/x86/kvm/vmx/depriv.c | 50 ++++++++++++++++++++++++---------------
+ 2 files changed, 44 insertions(+), 25 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 0722116ce2b4..74c86394e170 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1415,6 +1415,19 @@ nmi_restore:
+ SYM_CODE_END(asm_exc_nmi)
+ 
+ SYM_CODE_START(depriv_continue_in_root_mode)
++	/*
++	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
++	 */
++	push	%rax
++	mov	$1, %eax
++	movl	%eax, 0x10(%rsp)
++	pop	%rax
++
++	/*
++	 * switch to iret stack, which is mapped even in user space CR3
++	 */
++	mov	0x10(%rsp), %rsp
++
+ 	push	%rdx
+ 	push	%rcx
+ 	push	%rax
+@@ -1433,12 +1446,6 @@ SYM_CODE_START(depriv_continue_in_root_mode)
+ 	movl	0x4c(%rsp), %edx
+ 	wrmsr
+ 
+-	/*
+-	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
+-	 */
+-	mov	$1, %eax
+-	movl	%eax, 0x60(%rsp)
+-
+ 	pop	%rax
+ 	pop	%rcx
+ 	pop	%rdx
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index cb30b918a93f..1fd92c6515c4 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -55,17 +55,18 @@ module_param(intercept_cr3, bool, S_IRUGO);
+  */
+ #define DEPRIV_HOST_STACK_RESERVED_BYTES (16 * 8)
+ 
+-#define DEPRIV_HOST_STACK_GUEST_RIP_OFFSET	(0 * 8)
+-#define DEPRIV_HOST_STACK_GUEST_CS_OFFSET	(1 * 8)
+-#define DEPRIV_HOST_STACK_GUEST_RFLAGS_OFFSET	(2 * 8)
+-#define DEPRIV_HOST_STACK_GUEST_RSP_OFFSET	(3 * 8)
+-#define DEPRIV_HOST_STACK_GUEST_SS_OFFSET	(4 * 8)
+-#define DEPRIV_HOST_STACK_GUEST_CR3_OFFSET	(5 * 8)
+-#define DEPRIV_HOST_STACK_GUEST_GS_BASE_OFFSET	(6 * 8)
+-#define DEPRIV_HOST_STACK_GUEST_FS_BASE_OFFSET	(7 * 8)
+-
+-#define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(8 * 8)
+-#define DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE	(9 * 8)
++#define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(0 * 8)
++#define DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE	(1 * 8)
++#define DEPRIV_HOST_STACK_IRET_STACK		(2 * 8)
++
++#define DEPRIV_IRET_STACK_GUEST_RIP		(0 * 8)
++#define DEPRIV_IRET_STACK_GUEST_CS		(1 * 8)
++#define DEPRIV_IRET_STACK_GUEST_RFLAGS		(2 * 8)
++#define DEPRIV_IRET_STACK_GUEST_RSP		(3 * 8)
++#define DEPRIV_IRET_STACK_GUEST_SS		(4 * 8)
++#define DEPRIV_IRET_STACK_GUEST_CR3		(5 * 8)
++#define DEPRIV_IRET_STACK_GUEST_GS_BASE		(6 * 8)
++#define DEPRIV_IRET_STACK_GUEST_FS_BASE		(7 * 8)
+ 
+ static struct vmcs_config depriv_vmcs_conf;
+ static unsigned long depriv_task_cr3_pa;
+@@ -522,21 +523,21 @@ void vmx_depriv_rip(void);
+ void vmx_depriv_vmcall(void);
+ 
+ #define	DEPRIV_IRET_STACK_RIP							\
+-	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_RIP_OFFSET))
++	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_RIP))
+ #define	DEPRIV_IRET_STACK_CS							\
+-	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_CS_OFFSET))
++	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_CS))
+ #define	DEPRIV_IRET_STACK_RFLAGS						\
+-	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_RFLAGS_OFFSET))
++	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_RFLAGS))
+ #define	DEPRIV_IRET_STACK_RSP							\
+-	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_RSP_OFFSET))
++	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_RSP))
+ #define	DEPRIV_IRET_STACK_SS							\
+-	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_SS_OFFSET))
++	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_SS))
+ #define	DEPRIV_IRET_STACK_CR3							\
+-	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_CR3_OFFSET))
++	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_CR3))
+ #define	DEPRIV_IRET_STACK_GS_BASE						\
+-	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_GS_BASE_OFFSET))
++	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_GS_BASE))
+ #define	DEPRIV_IRET_STACK_FS_BASE						\
+-	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_FS_BASE_OFFSET))
++	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_FS_BASE))
+ 
+ #define DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ip_off) do {			\
+ 	DEPRIV_IRET_STACK_RIP		= rip + (ip_off);			\
+@@ -549,6 +550,12 @@ void vmx_depriv_vmcall(void);
+ 	DEPRIV_IRET_STACK_FS_BASE	= vmcs_readl(GUEST_FS_BASE);		\
+ } while (0)
+ 
++static inline u64 depriv_iret_stack_base(int cpu)
++{
++	return get_cpu_entry_area(cpu)->tss.x86_tss.ist[IST_INDEX_NMI] -
++	       CEA_ESTACK_SIZE(NMI) + 32 * 8;
++}
++
+ extern void vmx_validate_guest_state(void);
+ 
+ static void vmx_depriv_cpu(void *info)
+@@ -560,6 +567,7 @@ static void vmx_depriv_cpu(void *info)
+ 	void *host_cpu_state = NULL;
+ 	void *host_cr3_va = NULL;
+ 	void *msr_bitmap = NULL;
++	unsigned long iret_stack_base = depriv_iret_stack_base(cpu);
+ 	unsigned long host_rsp, rip, rsp, rflags;
+ 	int vmx_depriv_result;
+ 
+@@ -623,6 +631,7 @@ static void vmx_depriv_cpu(void *info)
+ 		     : "=m"(rflags) :: "%rax");
+ 	vmcs_writel(GUEST_RFLAGS, rflags & ~X86_EFLAGS_IF);
+ 
++	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_IRET_STACK) = iret_stack_base;
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(0);
+ 
+ 	pr_debug("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n", cpu, rip, rsp);
+@@ -867,6 +876,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	unsigned long rip = vmcs_readl(GUEST_RIP);
+ 	unsigned long rsp = vmcs_readl(GUEST_RSP);
+ 	int cpu = raw_smp_processor_id();
++	unsigned long iret_stack_base = depriv_iret_stack_base(cpu);
+ 	u32 reason = vmcs_read32(VM_EXIT_REASON), insn_len = 0;
+ 	char insn[64];
+ 
+@@ -874,6 +884,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ 	regs[VCPU_REGS_RSP] = rsp;
+ 
++	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_IRET_STACK) = iret_stack_base;
++
+ 	(*cnt)++;
+ 	counter = *cnt;
+ 
+-- 
+2.34.1
+

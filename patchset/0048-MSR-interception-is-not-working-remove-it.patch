@@ -1,0 +1,78 @@
+From 63caa9f8c3eaaa3685a692e25baf8b241e203a9b Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 16 Jun 2020 21:30:20 -0700
+Subject: [PATCH 048/140] MSR interception is not working, remove it
+
+---
+ arch/x86/kvm/vmx/depriv.c | 38 --------------------------------------
+ 1 file changed, 38 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 8adde2f03874..c72b83f4752c 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -968,39 +968,6 @@ int vmx_depriv(unsigned long host_rsp);
+ void vmx_depriv_rip(void);
+ void vmx_depriv_vmcall(void);
+ 
+-static void vmx_depriv_cpu_intercept_msr(u32 msr, bool enable)
+-{
+-	u32 orig_msr = msr;
+-	int cpu = smp_processor_id();
+-	void *msr_bitmap = per_cpu(depriv_cpu_state, cpu) +
+-			   DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
+-	int f = sizeof(unsigned long);
+-	bool set_result = false;
+-
+-	if (msr <= 0x1fff) {
+-		if (enable)
+-			__set_bit(msr, msr_bitmap + 0x800 / f);
+-		else
+-			__clear_bit(msr, msr_bitmap + 0x800 / f);
+-		set_result = !!test_bit(msr, msr_bitmap + 0x800 / f);
+-	} else if (msr >= 0xc0000000 && msr <= 0xc0001fff) {
+-		msr &= 0x1fff;
+-		if (enable)
+-			__set_bit(msr, msr_bitmap + 0xc00 / f);
+-		else
+-			__clear_bit(msr, msr_bitmap + 0xc00 / f);
+-		set_result = !!test_bit(msr, msr_bitmap + 0xc00 / f);
+-	} else {
+-		pr_err("depriv: cpu%d set MSR bitmap @ %#x out of scope\n",
+-		       cpu, orig_msr);
+-		return;
+-	}
+-
+-	if (set_result != enable)
+-		pr_err("depriv: cpu%d set MSR bitmap @ %#x failed\n",
+-		       cpu, orig_msr);
+-}
+-
+ #define	DEPRIV_IRET_STACK_RIP							\
+ 	(*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_RIP_OFFSET))
+ #define	DEPRIV_IRET_STACK_CS							\
+@@ -1077,9 +1044,6 @@ static void __init vmx_depriv_cpu(void *info)
+ 	// the 2nd page of host state
+ 	msr_bitmap = host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
+ 	memset(msr_bitmap, 0, PAGE_SIZE);
+-	//vmx_depriv_cpu_intercept_msr(MSR_FS_BASE, true);
+-	//vmx_depriv_cpu_intercept_msr(MSR_GS_BASE, true);
+-	//vmx_depriv_cpu_intercept_msr(MSR_KERNEL_GS_BASE, true);
+ 	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+ 
+ 	vmx_depriv_cpu_state();
+@@ -1661,11 +1625,9 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		switch (ecx) {
+ 		case MSR_IA32_SPEC_CTRL:
+ 			pr_debug("depriv: cpu%d (%ld) speculation control MSR = %#lx\n", cpu, *cnt, val);
+-			vmx_depriv_cpu_intercept_msr(MSR_IA32_PRED_CMD, false);
+ 			break;
+ 		case MSR_IA32_PRED_CMD:
+ 			pr_debug("depriv: cpu%d (%ld) prediction command MSR = %#lx\n", cpu, *cnt, val);
+-			vmx_depriv_cpu_intercept_msr(MSR_IA32_PRED_CMD, false);
+ 			break;
+ 		case MSR_FS_BASE:
+ 			pr_debug("depriv: cpu%d (%ld) FS base MSR = %#lx\n", cpu, *cnt, val);
+-- 
+2.34.1
+

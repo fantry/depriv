@@ -1,0 +1,22 @@
+From 7d49e7e29be64f733f0aff0262f921aaaf7fd0d0 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Mon, 26 Oct 2020 14:11:42 -0700
+Subject: [PATCH 132/140] cp built module to 5.10.0-rc1+ directory
+
+---
+ tools/testing/selftests/depriv/test_depriv.sh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/tools/testing/selftests/depriv/test_depriv.sh b/tools/testing/selftests/depriv/test_depriv.sh
+index 0e9debc5b8cb..3bc4d01980c4 100755
+--- a/tools/testing/selftests/depriv/test_depriv.sh
++++ b/tools/testing/selftests/depriv/test_depriv.sh
+@@ -16,4 +16,4 @@ sudo modprobe -r depriv-intel && sudo modprobe depriv-intel
+ sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
+ sudo modprobe -r depriv-intel && sudo modprobe depriv-intel
+ make -j5 modules
+-sudo cp arch/x86/depriv/depriv-intel.ko /lib/modules/5.9.0+/kernel/arch/x86/depriv/
++sudo cp arch/x86/depriv/depriv-intel.ko /lib/modules/5.10.0-rc1+/kernel/arch/x86/depriv/
+-- 
+2.34.1
+

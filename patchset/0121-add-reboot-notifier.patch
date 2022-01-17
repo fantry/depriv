@@ -1,0 +1,92 @@
+From fbde4430312d61d16480b8a05c1a7cd88554d5e4 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sat, 3 Oct 2020 09:03:42 -0700
+Subject: [PATCH 121/140] add reboot notifier
+
+---
+ arch/x86/depriv/vmx/depriv.c | 47 +++++++++++++++++++++++++++---------
+ 1 file changed, 36 insertions(+), 11 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 8c668bb3b2b0..3f84c223bde6 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -10,6 +10,7 @@
+ #include <linux/module.h>
+ #include <linux/pid_namespace.h>
+ #include <linux/slab.h>
++#include <linux/reboot.h>
+ 
+ #include <asm/tlbflush.h>
+ #include <asm/x86_vcpu_regs.h>
+@@ -547,6 +548,38 @@ static void vmx_free_pidns_cb(struct pid_namespace *ns)
+ 
+ extern struct depriv_ops depriv_ops;
+ 
++static void vmx_depriv_cleanup(void)
++{
++	on_each_cpu(vmx_repriv_cpu, NULL, 1);
++
++	depriv_ops.enter = NULL;
++	depriv_ops.exit = NULL;
++	depriv_ops.free_pidns_cb = NULL;
++
++	on_each_cpu(vmx_repriv_cpu_release_resources, NULL, 1);
++
++	pr_info("depriv: successfully unloaded, cpu vmx operation mask: %*pb[l]\n",
++		cpumask_pr_args(&cpu_vmx_operation_mask));
++
++	kmem_cache_destroy(loaded_vmcs_cache);
++}
++
++static int vmx_depriv_reboot(struct notifier_block *notifier, unsigned long val, void *v)
++{
++	depriv_exiting = true;
++
++	pr_info("depriv: %d cpus deprivileged, reprivileging while rebooting...\n",
++		cpumask_weight(&cpu_vmx_operation_mask));
++
++	vmx_depriv_cleanup();
++	return NOTIFY_OK;
++}
++
++static struct notifier_block depriv_reboot_notifier = {
++	.notifier_call = vmx_depriv_reboot,
++	.priority = 0,
++};
++
+ static int __init vmx_depriv_init(void)
+ {
+ 	int r = setup_vmcs_config();
+@@ -578,6 +611,7 @@ static int __init vmx_depriv_init(void)
+ 	depriv_ops.free_pidns_cb = vmx_free_pidns_cb;
+ 	depriv_ops.free_pidns_cb = NULL;
+ 
++	register_reboot_notifier(&depriv_reboot_notifier);
+ 	pr_info("depriv: successfully initialized\n");
+ 	return 0;
+ 
+@@ -603,18 +637,9 @@ static void __exit vmx_depriv_exit(void)
+ 		msleep(100);
+ 	}
+ 
+-	on_each_cpu(vmx_repriv_cpu, NULL, 1);
++	unregister_reboot_notifier(&depriv_reboot_notifier);
+ 
+-	depriv_ops.enter = NULL;
+-	depriv_ops.exit = NULL;
+-	depriv_ops.free_pidns_cb = NULL;
+-
+-	on_each_cpu(vmx_repriv_cpu_release_resources, NULL, 1);
+-
+-	pr_info("depriv: successfully unloaded, cpu vmx operation mask: %*pb[l]\n",
+-		cpumask_pr_args(&cpu_vmx_operation_mask));
+-
+-	kmem_cache_destroy(loaded_vmcs_cache);
++	vmx_depriv_cleanup();
+ }
+ 
+ module_init(vmx_depriv_init);
+-- 
+2.34.1
+

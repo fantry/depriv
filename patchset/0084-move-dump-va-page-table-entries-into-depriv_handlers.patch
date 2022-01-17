@@ -1,0 +1,179 @@
+From 92b37cc95c628f092abf6783dda4555f259fcf46 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Mon, 22 Jun 2020 12:48:13 -0700
+Subject: [PATCH 084/140] move dump va page table entries into
+ depriv_handlers.c
+
+---
+ arch/x86/kvm/vmx/depriv.c         | 63 +----------------------------
+ arch/x86/kvm/vmx/depriv_handler.c | 66 +++++++++++++++++++++++++++++++
+ 2 files changed, 67 insertions(+), 62 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 696979e31d81..1d0c89ee3b52 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -804,68 +804,7 @@ static inline u64 depriv_iret_stack_base(int cpu)
+ 	       CEA_ESTACK_SIZE(NMI) + 32 * 8;
+ }
+ 
+-static void dump_va_page_table_entry(void *virtual_address)
+-{
+-	int cpu = raw_smp_processor_id(), i;
+-	unsigned long host_cr3 = vmcs_readl(HOST_CR3);
+-	unsigned long guest_cr3 = vmcs_readl(GUEST_CR3);
+-	unsigned long *host_pte;
+-	unsigned long *guest_pte;
+-	unsigned long va = (unsigned long)virtual_address;
+-	unsigned int va_shift = PGDIR_SHIFT;
+-	bool host_pte_valid = true;
+-	bool guest_pte_valid = true;
+-	bool guest_sharing_host_pte = false;
+-
+-	pr_info("depriv: cpu%d  host cr3: 0x%016lx\n", cpu, host_cr3);
+-	pr_info("depriv: cpu%d guest cr3: 0x%016lx\n", cpu, guest_cr3);
+-
+-	host_pte = (unsigned long *)__va(host_cr3 & CR3_ADDR_MASK);
+-	guest_pte = (unsigned long *)__va(guest_cr3 & CR3_ADDR_MASK);
+-
+-	for (i = 4; i > 0; i--) {
+-		u32 slot = (u32)(va >> va_shift) & 0x1fful;
+-		va_shift -= 9;
+-
+-		if (host_pte_valid)
+-			pr_info("depriv: cpu%d  host p%dd pte[%03d]: 0x%016lx\n",
+-				cpu, i, slot, host_pte[slot]);
+-
+-		if (!guest_sharing_host_pte && guest_pte_valid)
+-			pr_info("depriv: cpu%d guest p%dd pte[%03d]: 0x%016lx\n",
+-				cpu, i, slot, guest_pte[slot]);
+-
+-		if (host_pte_valid && !guest_sharing_host_pte && guest_pte_valid) {
+-			if (host_pte[slot] != guest_pte[slot])
+-				pr_err("depriv: cpu%d host/guest mismatch pte at level %d\n",
+-				       cpu, i);
+-			else {
+-				pr_info("depriv: cpu%d guest shares host p%dd\n",
+-					cpu, i - 1);
+-				guest_sharing_host_pte = true;
+-			}
+-		}
+-
+-		if (host_pte_valid && host_pte[slot] & 0x1)
+-			host_pte = __va(host_pte[slot] & CR3_ADDR_MASK);
+-		else {
+-			pr_err("depriv: cpu%d  host pte missing at level %d\n", cpu, i);
+-			host_pte_valid = false;
+-		}
+-
+-		if (!guest_sharing_host_pte) {
+-			if (guest_pte_valid && guest_pte[slot] & 0x1)
+-				guest_pte = __va(guest_pte[slot] & CR3_ADDR_MASK);
+-			else {
+-				pr_err("depriv: cpu%d guest pte missing at level %d\n", cpu, i);
+-				guest_pte_valid = false;
+-			}
+-		}
+-
+-		if (!host_pte_valid && (guest_sharing_host_pte || !guest_pte_valid))
+-			break;
+-	}
+-}
++void dump_va_page_table_entry(void *virtual_address);
+ 
+ #define	DEPRIV_IRET_STACK_RIP							\
+ 	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_RIP))
+diff --git a/arch/x86/kvm/vmx/depriv_handler.c b/arch/x86/kvm/vmx/depriv_handler.c
+index e29301ab6bd5..9f44e95a5874 100644
+--- a/arch/x86/kvm/vmx/depriv_handler.c
++++ b/arch/x86/kvm/vmx/depriv_handler.c
+@@ -45,6 +45,69 @@ void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ 	insn[3 * i] = '\0';
+ }
+ 
++void dump_va_page_table_entry(void *virtual_address)
++{
++	int cpu = raw_smp_processor_id(), i;
++	unsigned long host_cr3 = vmcs_readl(HOST_CR3);
++	unsigned long guest_cr3 = vmcs_readl(GUEST_CR3);
++	unsigned long *host_pte;
++	unsigned long *guest_pte;
++	unsigned long va = (unsigned long)virtual_address;
++	unsigned int va_shift = PGDIR_SHIFT;
++	bool host_pte_valid = true;
++	bool guest_pte_valid = true;
++	bool guest_sharing_host_pte = false;
++
++	pr_info("depriv: cpu%d  host cr3: 0x%016lx\n", cpu, host_cr3);
++	pr_info("depriv: cpu%d guest cr3: 0x%016lx\n", cpu, guest_cr3);
++
++	host_pte = (unsigned long *)__va(host_cr3 & CR3_ADDR_MASK);
++	guest_pte = (unsigned long *)__va(guest_cr3 & CR3_ADDR_MASK);
++
++	for (i = 4; i > 0; i--) {
++		u32 slot = (u32)(va >> va_shift) & 0x1fful;
++		va_shift -= 9;
++
++		if (host_pte_valid)
++			pr_info("depriv: cpu%d  host p%dd pte[%03d]: 0x%016lx\n",
++				cpu, i, slot, host_pte[slot]);
++
++		if (!guest_sharing_host_pte && guest_pte_valid)
++			pr_info("depriv: cpu%d guest p%dd pte[%03d]: 0x%016lx\n",
++				cpu, i, slot, guest_pte[slot]);
++
++		if (host_pte_valid && !guest_sharing_host_pte && guest_pte_valid) {
++			if (host_pte[slot] != guest_pte[slot])
++				pr_err("depriv: cpu%d host/guest mismatch pte at level %d\n",
++				       cpu, i);
++			else {
++				pr_info("depriv: cpu%d guest shares host p%dd\n",
++					cpu, i - 1);
++				guest_sharing_host_pte = true;
++			}
++		}
++
++		if (host_pte_valid && host_pte[slot] & 0x1)
++			host_pte = __va(host_pte[slot] & CR3_ADDR_MASK);
++		else {
++			pr_err("depriv: cpu%d  host pte missing at level %d\n", cpu, i);
++			host_pte_valid = false;
++		}
++
++		if (!guest_sharing_host_pte) {
++			if (guest_pte_valid && guest_pte[slot] & 0x1)
++				guest_pte = __va(guest_pte[slot] & CR3_ADDR_MASK);
++			else {
++				pr_err("depriv: cpu%d guest pte missing at level %d\n", cpu, i);
++				guest_pte_valid = false;
++			}
++		}
++
++		if (!host_pte_valid && (guest_sharing_host_pte || !guest_pte_valid))
++			break;
++	}
++}
++
+ static void handle_cr3_access(unsigned long *regs, unsigned long cnt)
+ {
+ 	int cpu = raw_smp_processor_id();
+@@ -126,6 +189,7 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	unsigned long rip = vmcs_readl(GUEST_RIP);
++	unsigned long rsp = vmcs_readl(GUEST_RSP);
+ 	char insn[64];
+ 	u32 insn_len = 0;
+ 	bool continue_in_root_mode = true;
+@@ -146,6 +210,8 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 		unsigned long cr2 = vmcs_readl(EXIT_QUALIFICATION);
+ 		pr_info("depriv: cpu%d (%ld) page fault @ %#lx with error code %#x\n",
+ 			cpu, cnt, cr2, error_code);
++		pr_info("depriv: cpu%d (%ld) rip: %#lx rsp: %#lx insn: %s\n",
++			cpu, cnt, rip, rsp, insn);
+ 		native_write_cr2(cr2);
+ 		continue_in_root_mode = false;
+ 	} else if (is_gp_fault(intr_info))
+-- 
+2.34.1
+

@@ -1,0 +1,52 @@
+From 057b65da419d07a2aa70cc64ea7ae8796bcbc571 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 21 Jun 2020 11:39:11 -0700
+Subject: [PATCH 076/140] fix rax corruption
+
+---
+ arch/x86/kvm/vmx/depriv.c       | 5 +----
+ arch/x86/kvm/vmx/depriv_entry.S | 4 +++-
+ 2 files changed, 4 insertions(+), 5 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 7a1a8ae962c7..ba9f94cebdad 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -859,9 +859,6 @@ void vmx_repriv_cpu_state(void)
+ } while (0)
+ 
+ #define DEPRIV_CONTINUE_IN_ROOT_MODE(ins_len) do {				\
+-	pr_info("depriv: repriv cpu%d exit reason %d skip %d bytes instruction "\
+-		"and continue in root mode\n",					\
+-		cpu, reason, ins_len);						\
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ins_len);				\
+ 	return false;								\
+ } while (0)
+@@ -952,7 +949,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ 		/* continue in root mode */
+ 		dump_guest_insn(rip, vmcs_read32(VM_EXIT_INSTRUCTION_LEN), insn);
+-		pr_info("depriv: cpu%d (%ld) exit reason: %#x rip: %#lx rsp: %#lx insn: %s\n",
++		pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx insn: %s\n",
+ 			cpu, counter, reason, rip, rsp, insn);
+ 		DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 	}
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index f517fdce4750..dc21c9956971 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -46,8 +46,10 @@ SYM_CODE_START(vmx_depriv_continue_in_root_mode)
+ 	/*
+ 	 * set to 1 to indicate already in root mode, thus avoid switching to root mode again
+ 	 */
++	push %rax
+ 	mov	$1, %eax
+-	movl	%eax, 0x8(%rsp)
++	movl	%eax, 0x10(%rsp)
++	pop %rax
+ 
+ 	/*
+ 	 * switch to iret stack, which is mapped even in user space CR3
+-- 
+2.34.1
+

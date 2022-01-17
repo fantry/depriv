@@ -1,0 +1,33 @@
+From ec2fcde8582902eed7a30fe979461bdd777a5558 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 29 Sep 2021 19:41:12 -0700
+Subject: [PATCH 138/140] remove a duplicated def
+
+---
+ arch/x86/include/asm/kvm_host.h | 10 ----------
+ 1 file changed, 10 deletions(-)
+
+diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
+index f3d2f175d4b0..5d20ec0846c9 100644
+--- a/arch/x86/include/asm/kvm_host.h
++++ b/arch/x86/include/asm/kvm_host.h
+@@ -1822,16 +1822,6 @@ static inline void kvm_load_ldt(u16 sel)
+ 	asm("lldt %0" : : "rm"(sel));
+ }
+ 
+-#ifdef CONFIG_X86_64
+-static inline unsigned long read_msr(unsigned long msr)
+-{
+-	u64 value;
+-
+-	rdmsrl(msr, value);
+-	return value;
+-}
+-#endif
+-
+ static inline u32 get_rdx_init_val(void)
+ {
+ 	return 0x600; /* P6 family */
+-- 
+2.34.1
+

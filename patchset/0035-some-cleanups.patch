@@ -1,0 +1,33 @@
+From a05d9f5f8c3c9410729f3e556c478b530eacc124 Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Mon, 15 Jun 2020 14:46:17 -0700
+Subject: [PATCH 035/140] some cleanups
+
+---
+ arch/x86/kvm/vmx/depriv.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index ef19492fd9b3..ace31138c9f1 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -576,7 +576,6 @@ static int __init setup_depriv_vmcs_config(void)
+ 		// if EPT is available, it's OK to disable this control
+ 		_cpu_based_exec_control &= ~CPU_BASED_CR3_LOAD_EXITING;
+ 		pr_info("depriv: disabled cr3 load exiting\n");
+-		//pr_info("depriv: keep cr3 load exiting\n");
+ 	}
+ 
+ 	if (_cpu_based_exec_control & CPU_BASED_CR3_STORE_EXITING) {
+@@ -1341,6 +1340,8 @@ static void vmx_repriv_cpu(void *info)
+ 
+ void vmx_repriv_host(void)
+ {
++	pr_info("depriv: %d cpus deprivileged\n", depriv_cpu_count);
++
+ 	on_each_cpu(vmx_repriv_cpu, NULL, 0);
+ 
+ 	while (depriv_cpu_count) {
+-- 
+2.34.1
+

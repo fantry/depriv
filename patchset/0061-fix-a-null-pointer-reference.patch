@@ -1,0 +1,37 @@
+From 57529142801caa1ff2a034926904d6e4242541cb Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Thu, 18 Jun 2020 21:08:43 -0700
+Subject: [PATCH 061/140] fix a null pointer reference
+
+---
+ arch/x86/kvm/vmx/depriv.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 46bd14b1371c..29e52a548367 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -794,10 +794,16 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ void vmx_repriv_cpu(void *info)
+ {
+ 	int cpu = smp_processor_id();
+-	int *to_root_mode = (int *)(per_cpu(depriv_cpu_state, cpu) +
+-				    DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
+-				    DEPRIV_HOST_STACK_RESERVED_BYTES +
+-				    DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
++	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
++	int *to_root_mode = NULL;
++
++	if (!host_cpu_state)
++		return;
++
++	to_root_mode = (int *)(host_cpu_state +
++			       DEPRIV_CPU_STATE_VMCS_MSR_BITMAP -
++			       DEPRIV_HOST_STACK_RESERVED_BYTES +
++			       DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE);
+ 
+ 	++(*to_root_mode);
+ 
+-- 
+2.34.1
+

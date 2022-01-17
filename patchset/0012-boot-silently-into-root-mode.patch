@@ -1,0 +1,239 @@
+From f4fdf92c112e12951e760f3cdfdc84836d1048ec Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 11 Jun 2020 08:37:42 -0700
+Subject: [PATCH 012/140] boot silently into root mode
+
+---
+ arch/x86/kvm/vmx/vmenter.S |  2 +
+ arch/x86/kvm/vmx/vmx.c     | 89 ++++++++++++++++++++++----------------
+ 2 files changed, 54 insertions(+), 37 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmenter.S b/arch/x86/kvm/vmx/vmenter.S
+index 8e16b6ddc3cf..4fbf6367636d 100644
+--- a/arch/x86/kvm/vmx/vmenter.S
++++ b/arch/x86/kvm/vmx/vmenter.S
+@@ -160,6 +160,8 @@ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	 */
+ 	vmresume
+ 
++	jmp vmx_depriv_continue_in_root_mode
++
+ 	/*
+ 	 * VM resume failed, switch back to root mode with guest stack
+ 	 */
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 46c453928fd8..aeeec5b1f2d2 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8721,25 +8721,29 @@ static void vmx_repriv_cpu_state(void)
+ 	vmx_repriv_cpu_desc_tables();
+ }
+ 
+-#define CONTINUE_IN_NON_ROOT_MODE do {						\
+-	insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);			\
+-	vmcs_writel(GUEST_RIP, guest_rip + insn_len);				\
+-	return true;								\
+-} while (0)
+-
+-#define CONTINUE_IN_ROOT_MODE(insn_len) do {					\
+-	*(unsigned long *)(host_rsp + 0x0) = vmcs_readl(GUEST_RIP) + (insn_len);\
++#define DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ip_off) do {			\
++	*(unsigned long *)(host_rsp + 0x0) = guest_rip + (ip_off);		\
+ 	*(unsigned long *)(host_rsp + 0x8) = vmcs_read16(GUEST_CS_SELECTOR);	\
+ 	*(unsigned long *)(host_rsp + 0x10) = vmcs_readl(GUEST_RFLAGS);		\
+ 	*(unsigned long *)(host_rsp + 0x18) = vmcs_readl(GUEST_RSP);		\
+ 	*(unsigned long *)(host_rsp + 0x20) = vmcs_read16(GUEST_SS_SELECTOR);	\
+-	vmx_repriv_cpu_state();							\
+-	dump_vmcs();								\
+ 	*(unsigned long *)(host_rsp + 0x28) = vmcs_readl(GUEST_CR3);		\
+ 	*(unsigned long *)(host_rsp + 0x30) = vmcs_readl(GUEST_GS_BASE);	\
+-	pr_info("depriv: cpu%d exit reason %d skip %d bytes instruction "	\
+-		"and continue in root mode\n",					\
+-		cpu, reason, insn_len);						\
++} while (0)
++
++#define DEPRIV_CONTINUE_IN_NON_ROOT_MODE(ins_len) do {				\
++	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(0);				\
++	vmcs_writel(GUEST_RIP, guest_rip + ins_len);				\
++	return true;								\
++} while (0)
++
++#define DEPRIV_CONTINUE_IN_ROOT_MODE(ins_len) do {				\
++	vmx_repriv_cpu_state();							\
++	dump_vmcs();								\
++	pr_info("depriv: cpu%d exit reason %d skip %d bytes instruction and "	\
++		"continue in root mode\n",					\
++		cpu, reason, ins_len);						\
++	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK(ins_len);				\
+ 	return false;								\
+ } while (0)
+ 
+@@ -8789,11 +8793,15 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 	unsigned long guest_rsp = vmcs_readl(GUEST_RSP);
+ 	char insn[64];
+ 	u32 insn_len;
++	static bool enable_log = false;
+ 
+ 	guest_regs[__VCPU_REGS_RSP] = guest_rsp;
+ 
+ 	pr_debug("depriv: cpu%d exit reason:%#x rip:%#lx rsp:%#lx\n",
+ 		 cpu, reason, guest_rip, guest_rsp);
++	if (enable_log)
++		pr_info("depriv: cpu%d exit reason:%#x rip:%#lx rsp:%#lx\n",
++			cpu, reason, guest_rip, guest_rsp);
+ 
+ 	pr_debug("depriv: cpu%d host rsp:%#lx\n", cpu, host_rsp);
+ 
+@@ -8801,7 +8809,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		dump_vmcs();
+ 		vmx_check_guest_state();
+ 		// no need to sync guest state to host if we never enter guest
+-		CONTINUE_IN_ROOT_MODE(0);
++		DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 	}
+ 
+ 	switch (reason) {
+@@ -8851,11 +8859,12 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr);
+ 			vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, insn_len);
+ 			vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
+-
+ 			pr_info("depriv: cpu%d injecting exception %d, continue in non-root mode\n",
+ 				cpu, vector);
++
+ 			dump_vmcs();
+-			return true;
++			enable_log = true;
++			continue_in_root_mode = false;
+ 		} else if (is_gp_fault(intr_info)) {
+ 			pr_info("depriv: cpu%d hit GP @ rip:%#lx insn: %s\n",
+ 				cpu, guest_rip, insn);
+@@ -8869,11 +8878,11 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		if (continue_in_root_mode) {
+ 			pr_info("depriv: cpu%d hit exception %d, continue in root mode\n",
+ 				cpu, vector);
+-			CONTINUE_IN_ROOT_MODE(0);
++			DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 		} else {
+ 			pr_info("depriv: cpu%d hit exception %d, continue in non-root mode\n",
+ 				cpu, vector);
+-			CONTINUE_IN_NON_ROOT_MODE;
++			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+ 	}
+ 
+@@ -8884,7 +8893,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		unsigned long guest_cr4 = vmcs_readl(GUEST_CR4);
+ 
+ 		if (cr != 3)
+-			CONTINUE_IN_ROOT_MODE(0);
++			DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 
+ 		if (guest_cr4 & X86_CR4_PCIDE)
+ 			pr_info("depriv: cpu%d PCID enabled\n", cpu);
+@@ -8920,13 +8929,13 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			break;
+ 		}
+ 
++		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 		if (true) {
+ 			pr_debug("depriv: cpu%d accessed cr3 and continue in non-root mode\n", cpu);
+-			CONTINUE_IN_NON_ROOT_MODE;
++			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		} else {
+ 			pr_info("depriv: cpu%d accessed cr3 and continue in root mode\n", cpu);
+-			insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-			CONTINUE_IN_ROOT_MODE(insn_len);
++			DEPRIV_CONTINUE_IN_ROOT_MODE(insn_len);
+ 		}
+ 	}
+ 
+@@ -8947,24 +8956,25 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RCX],
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RDX]);
+ 
++		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 		if (true) {
+ 			pr_debug("depriv: cpu%d executed cpuid and continue in non-root mode\n", cpu);
+-			CONTINUE_IN_NON_ROOT_MODE;
++			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		} else {
+ 			pr_info("depriv: cpu%d executed cpuid and continue in root mode\n", cpu);
+-			insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-			CONTINUE_IN_ROOT_MODE(insn_len);
++			DEPRIV_CONTINUE_IN_ROOT_MODE(insn_len);
+ 		}
+ 	}
+ 
+ 	case EXIT_REASON_VMCALL:
++		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
++
+ 		if (true) {
+ 			pr_info("depriv: cpu%d vmcall: continue in non-root mode\n", cpu);
+-			CONTINUE_IN_NON_ROOT_MODE;
++			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+ 
+-		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-		CONTINUE_IN_ROOT_MODE(insn_len);
++		DEPRIV_CONTINUE_IN_ROOT_MODE(insn_len);
+ 		break;
+ 
+ 	case EXIT_REASON_MSR_READ: {
+@@ -8972,14 +8982,17 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		unsigned long long val;
+ 		static int cnt_0x3b = 0;
+ 
+-		if (rdmsrl_safe(ecx, &val)) {
++		/*
++		 * never read GS base from MSR, which now points to kernel mode per-CPU data
++		 * and this VM exit handler always runs in kernel mode.
++		 */
++		if (ecx == MSR_GS_BASE)
++			val = vmcs_readl(GUEST_GS_BASE);
++		else if (rdmsrl_safe(ecx, &val))
+ 			pr_info("depriv: cpu%d msr[%#x]: %#llx failed\n", cpu, ecx, val);
+-			guest_regs[__VCPU_REGS_RAX] = (u32)val;
+-			guest_regs[__VCPU_REGS_RDX] = (u32)(val >> 32);
+-			CONTINUE_IN_NON_ROOT_MODE;
+-		}
+ 
+ 		pr_info("depriv: cpu%d msr[%#x]: %#llx\n", cpu, ecx, val);
++
+ 		if (ecx == 0x3b) {
+ 			cnt_0x3b++;
+ 			if (cnt_0x3b == 2) {
+@@ -8992,7 +9005,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		guest_regs[__VCPU_REGS_RDX] = (u32)(val >> 32);
+ 
+ 		pr_info("depriv: cpu%d executed rdmsr and continue in non-root mode\n", cpu);
+-		CONTINUE_IN_NON_ROOT_MODE;
++		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
++		DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 	}
+ 
+ 	case EXIT_REASON_MSR_WRITE: {
+@@ -9051,16 +9065,17 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 		if (unlikely(continue_in_root_mode)) {
+ 			pr_info("depriv: cpu%d msr[%#x] = %#lx failed, continue in root mode\n",
+ 				cpu, ecx, val);
+-			CONTINUE_IN_ROOT_MODE(0);
++			DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 		} else {
+ 			pr_debug("depriv: cpu%d executed wrmsr and continue in non-root mode\n", cpu);
+-			CONTINUE_IN_NON_ROOT_MODE;
++			insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
++			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+ 	}
+ 
+ 	default: /* continue in root mode */
+ 		pr_info("depriv: cpu%d exit reason=%#x\n", cpu, reason);
+-		CONTINUE_IN_ROOT_MODE(0);
++		DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 	}
+ }
+ 
+-- 
+2.34.1
+

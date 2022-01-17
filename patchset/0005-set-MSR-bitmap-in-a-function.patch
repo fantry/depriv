@@ -1,0 +1,165 @@
+From df9611b2c50537b7dcc7141525f17f7ce1b6bb73 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 10 Jun 2020 13:46:04 -0700
+Subject: [PATCH 005/140] set MSR bitmap in a function
+
+---
+ arch/x86/kvm/vmx/vmx.c | 57 +++++++++++++++++++++++++++++-------------
+ 1 file changed, 39 insertions(+), 18 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 698efe2187cd..dda33b9f088f 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8373,7 +8373,7 @@ static void vmx_repriv_cpu_release_resources(void)
+ 	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+ 	struct vmcs *vmcs = per_cpu(depriv_vmcs, cpu);
+ 
+-	pr_info("depriv: reprivilege cpu %d releasing resources\n", cpu);
++	pr_info("depriv: reprivilege cpu%d releasing resources\n", cpu);
+ 
+ 	if (host_cpu_state) {
+ 		per_cpu(depriv_cpu_state, cpu) = NULL;
+@@ -8393,6 +8393,27 @@ int vmx_depriv(void);
+ void vmx_depriv_guest_rip(void);
+ void vmx_depriv_test_vmcall(void);
+ 
++static void __init vmx_depriv_cpu_intercept_msr(u32 msr, void *msr_bitmap)
++{
++	int cpu = smp_processor_id();
++	int f = sizeof(unsigned long);
++	bool set_result = false;
++	u32 orig_msr = msr;
++
++	if (msr <= 0x1fff) {
++		__set_bit(msr, msr_bitmap + 0x800 / f);
++		set_result = !!test_bit(msr, msr_bitmap + 0x800 / f);
++	} else if (msr >= 0xc0000000 && msr <= 0xc0001fff) {
++		msr &= 0x1fff;
++		__set_bit(msr, msr_bitmap + 0xc00 / f);
++		set_result = !!test_bit(msr, msr_bitmap + 0xc00 / f);
++	}
++
++	if (!set_result)
++		pr_err("depriv: cpu%d set MSR bitmap @ %#x failed\n",
++		       cpu, orig_msr);
++}
++
+ static void __init vmx_depriv_cpu(void *info)
+ {
+ 	int cpu = smp_processor_id();
+@@ -8405,13 +8426,13 @@ static void __init vmx_depriv_cpu(void *info)
+ 	int vmx_depriv_result;
+ 
+ 	if (!(depriv_vmcs_conf.cpu_based_exec_ctrl & CPU_BASED_USE_MSR_BITMAPS)) {
+-		pr_err("depriv: MSR bitmap not available on cpu %d\n", cpu);
++		pr_err("depriv: MSR bitmap not available on cpu%d\n", cpu);
+ 		goto error;
+ 	}
+ 
+ 	vmcs = alloc_vmcs_cpu(false, cpu, GFP_KERNEL);
+ 	if (!vmcs) {
+-		pr_err("depriv: unable to allocate VMCS for cpu %d\n", cpu);
++		pr_err("depriv: unable to allocate VMCS for cpu%d\n", cpu);
+ 		goto error;
+ 	}
+ 
+@@ -8424,7 +8445,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 	// memory for root mode VM exit handler
+ 	page = __alloc_pages_node(node, GFP_KERNEL, DEPRIV_CPU_STATE_PAGE_ORDER);
+ 	if (!page) {
+-		pr_err("depriv: unable to allocate host state buffer for cpu %d\n", cpu);
++		pr_err("depriv: unable to allocate host state buffer for cpu%d\n", cpu);
+ 		goto error;
+ 	}
+ 
+@@ -8434,12 +8455,9 @@ static void __init vmx_depriv_cpu(void *info)
+ 
+ 	// last page of host state
+ 	msr_bitmap = host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
+-	__set_bit(MSR_FS_BASE & 0x1fff,
+-		  msr_bitmap + 0xc00 / sizeof(unsigned long));
+-	__set_bit(MSR_GS_BASE & 0x1fff,
+-		  msr_bitmap + 0xc00 / sizeof(unsigned long));
+-	__set_bit(MSR_KERNEL_GS_BASE & 0x1fff,
+-		  msr_bitmap + 0xc00 / sizeof(unsigned long));
++	vmx_depriv_cpu_intercept_msr(MSR_FS_BASE, msr_bitmap);
++	vmx_depriv_cpu_intercept_msr(MSR_GS_BASE, msr_bitmap);
++	vmx_depriv_cpu_intercept_msr(MSR_KERNEL_GS_BASE, msr_bitmap);
+ 	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+ 
+ 	vmx_depriv_cpu_state();
+@@ -8466,7 +8484,7 @@ static void __init vmx_depriv_cpu(void *info)
+ 		     : "=m"(guest_rflags) :: "%rax");
+ 	vmcs_writel(GUEST_RFLAGS, guest_rflags & ~X86_EFLAGS_IF);
+ 
+-	pr_info("depriv: deprivileging cpu %d: guest rip=%#lx guest rsp=%#lx\n",
++	pr_info("depriv: deprivileging cpu%d: guest rip=%#lx guest rsp=%#lx\n",
+ 		cpu, vmcs_readl(GUEST_RIP), guest_rsp);
+ 
+ 	if (false) // true: test code path handling vmresume caused VM-entry fail
+@@ -8488,15 +8506,18 @@ static void __init vmx_depriv_cpu(void *info)
+ 		pr_info("depriv: cpu%d deprivileged: rsp=%#lx  rflags=%#lx\n",
+ 			cpu, guest_rsp, guest_rflags);
+ 
++		wrmsrl(MSR_FS_BASE, read_msr(MSR_FS_BASE));
++		wrmsrl(MSR_GS_BASE, read_msr(MSR_GS_BASE));
++		wrmsrl(MSR_KERNEL_GS_BASE, read_msr(MSR_KERNEL_GS_BASE));
+ 		vmx_depriv_test_vmcall();
+ 		return;
+ 	}
+ 
+ 	// still in root mode
+ 	if (vmx_depriv_result == 1)
+-		pr_err("depriv: launch failed on cpu %d\n", cpu);
++		pr_err("depriv: launch failed on cpu%d\n", cpu);
+ 	else if (vmx_depriv_result == 2)
+-		pr_err("depriv: resume failed on cpu %d\n", cpu);
++		pr_err("depriv: resume failed on cpu%d\n", cpu);
+ 
+ error:
+ 	vmx_repriv_cpu_release_resources();
+@@ -8526,19 +8547,19 @@ static void vmx_repriv_cpu_crs(void)
+ 	unsigned long guest_cr4 = vmcs_readl(GUEST_CR4);
+ 
+ 	if (host_cr0 != guest_cr0) {
+-		pr_info("depriv: repriv cpu %d cr0 %#lx : %#lx : %#lx\n",
++		pr_info("depriv: repriv cpu%d cr0 %#lx : %#lx : %#lx\n",
+ 			cpu, host_cr0, vmcs_readl(HOST_CR0), guest_cr0);
+ 		write_cr0(guest_cr0);
+ 		vmcs_writel(HOST_CR0, guest_cr0);
+ 	}
+ 
+ 	if (host_cr3 != guest_cr3) {
+-		pr_info("depriv: repriv cpu %d cr3 %#lx : %#lx\n",
++		pr_info("depriv: repriv cpu%d cr3 %#lx : %#lx\n",
+ 			cpu, host_cr3, guest_cr3);
+ 	}
+ 
+ 	if (host_cr4 != guest_cr4) {
+-		pr_info("depriv: repriv cpu %d cr4 %#lx : %#lx : %#lx\n",
++		pr_info("depriv: repriv cpu%d cr4 %#lx : %#lx : %#lx\n",
+ 			cpu, host_cr4, vmcs_readl(HOST_CR4), guest_cr4);
+ 		vmcs_writel(HOST_CR4, guest_cr4);
+ 	}
+@@ -8866,7 +8887,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 
+ 			vmcs_writel(GUEST_CR3, cr3);
+ 
+-			pr_info("depriv: cpu %d wrote cr3 from reg%d: %#lx (%#lx)\n",
++			pr_info("depriv: cpu%d wrote cr3 from reg%d: %#lx (%#lx)\n",
+ 				cpu, cr, cr3, guest_regs[reg]);
+ 			break;
+ 		}
+@@ -8877,7 +8898,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			if (reg == __VCPU_REGS_RSP)
+ 				vmcs_writel(GUEST_RSP, guest_regs[reg]);
+ 
+-			pr_debug("depriv: cpu %d read cr3 to reg%d: %#lx\n",
++			pr_debug("depriv: cpu%d read cr3 to reg%d: %#lx\n",
+ 				 cpu, cr, guest_regs[reg]);
+ 			break;
+ 		}
+-- 
+2.34.1
+

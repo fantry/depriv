@@ -1,0 +1,121 @@
+From 0b49ca3cceb54feea7613cd27dd72e272d578889 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 10 Jun 2020 14:58:11 -0700
+Subject: [PATCH 006/140] don't use MSR bitmap on ESXi
+
+---
+ arch/x86/kvm/vmx/vmx.c | 33 +++++++++++++++++----------------
+ 1 file changed, 17 insertions(+), 16 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index dda33b9f088f..d69924db9007 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8425,10 +8425,12 @@ static void __init vmx_depriv_cpu(void *info)
+ 	unsigned long host_rsp, guest_rsp, guest_rflags;
+ 	int vmx_depriv_result;
+ 
++#if 0
+ 	if (!(depriv_vmcs_conf.cpu_based_exec_ctrl & CPU_BASED_USE_MSR_BITMAPS)) {
+ 		pr_err("depriv: MSR bitmap not available on cpu%d\n", cpu);
+ 		goto error;
+ 	}
++#endif
+ 
+ 	vmcs = alloc_vmcs_cpu(false, cpu, GFP_KERNEL);
+ 	if (!vmcs) {
+@@ -8793,12 +8795,11 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 	unsigned long guest_rsp = vmcs_readl(GUEST_RSP);
+ 	char insn[64];
+ 	u32 insn_len;
+-	static int cnt = 0;
+ 
+ 	guest_regs[__VCPU_REGS_RSP] = guest_rsp;
+ 
+-	pr_debug("depriv: cpu%d exit count:%d reason:%#x rip:%#lx rsp:%#lx\n",
+-		 cpu, ++cnt, reason, guest_rip, guest_rsp);
++	pr_debug("depriv: cpu%d exit reason:%#x rip:%#lx rsp:%#lx\n",
++		 cpu, reason, guest_rip, guest_rsp);
+ 
+ 	pr_debug("depriv: cpu%d host rsp:%#lx\n", cpu, host_rsp);
+ 
+@@ -8920,7 +8921,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RCX],
+ 			     (unsigned int *)&guest_regs[__VCPU_REGS_RDX]);
+ 
+-		if (cnt < 1000) {
++		if (true) {
+ 			pr_debug("depriv: cpu%d executed cpuid and continue in non-root mode\n", cpu);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		} else {
+@@ -8931,7 +8932,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 	}
+ 
+ 	case EXIT_REASON_VMCALL:
+-		if (false) {
++		if (true) {
+ 			pr_info("depriv: cpu%d vmcall: continue in non-root mode\n", cpu);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		}
+@@ -8978,7 +8979,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			pr_debug("depriv: cpu%d speculation control msr = %#lx\n", cpu, val);
+ 			break;
+ 		case MSR_FS_BASE:
+-			pr_info("depriv: cpu%d FS base MSR = %#lx\n", cpu, val);
++			pr_debug("depriv: cpu%d FS base MSR = %#lx\n", cpu, val);
+ 			/*
+ 			 * guest FS base needs to be syned up with MSR_FS_BASE, thus we will
+ 			 * have correct FS base value in non-root mode after all future VM-entries.
+@@ -9018,7 +9019,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 				cpu, ecx, val);
+ 			CONTINUE_IN_ROOT_MODE(0);
+ 		} else {
+-			pr_info("depriv: cpu%d executed wrmsr and continue in non-root mode\n", cpu);
++			pr_debug("depriv: cpu%d executed wrmsr and continue in non-root mode\n", cpu);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		}
+ 
+@@ -9042,7 +9043,7 @@ static int __init setup_depriv_vmcs_config(void)
+ 
+ 	memset(&depriv_vmcs_conf, 0, sizeof(depriv_vmcs_conf));
+ 	min = 0;
+-	opt = CPU_BASED_USE_MSR_BITMAPS |
++	opt = //CPU_BASED_USE_MSR_BITMAPS |
+ 	      CPU_BASED_ACTIVATE_SECONDARY_CONTROLS;
+ 	if (adjust_vmx_controls(min, opt, MSR_IA32_VMX_PROCBASED_CTLS,
+ 				&_cpu_based_exec_control) < 0)
+@@ -9076,11 +9077,11 @@ static int __init setup_depriv_vmcs_config(void)
+ 		pr_info("depriv: invlpg causes VM exits\n");
+ 	}
+ 
+-	min = //VM_EXIT_SAVE_DEBUG_CONTROLS |
++	min = VM_EXIT_SAVE_DEBUG_CONTROLS |
+ 	      VM_EXIT_HOST_ADDR_SPACE_SIZE;
+-	opt = 0;//VM_EXIT_LOAD_IA32_PERF_GLOBAL_CTRL;
+-	      //VM_EXIT_LOAD_IA32_PAT |
+-	      //VM_EXIT_LOAD_IA32_EFER;
++	opt = VM_EXIT_LOAD_IA32_PERF_GLOBAL_CTRL |
++	      VM_EXIT_LOAD_IA32_PAT |
++	      VM_EXIT_LOAD_IA32_EFER;
+ 	if (adjust_vmx_controls(min, opt, MSR_IA32_VMX_EXIT_CTLS,
+ 				&_vmexit_control) < 0)
+ 		return -EIO;
+@@ -9097,11 +9098,11 @@ static int __init setup_depriv_vmcs_config(void)
+ 		SECONDARY_EXEC_VIRTUAL_INTR_DELIVERY))
+ 		_pin_based_exec_control &= ~PIN_BASED_POSTED_INTR;
+ 
+-	min = //VM_ENTRY_LOAD_DEBUG_CONTROLS |
++	min = VM_ENTRY_LOAD_DEBUG_CONTROLS |
+ 	      VM_ENTRY_IA32E_MODE;
+-	opt = 0;//VM_ENTRY_LOAD_IA32_PERF_GLOBAL_CTRL;
+-	      //VM_ENTRY_LOAD_IA32_PAT |
+-	      //VM_ENTRY_LOAD_IA32_EFER;
++	opt = VM_ENTRY_LOAD_IA32_PERF_GLOBAL_CTRL |
++	      VM_ENTRY_LOAD_IA32_PAT |
++	      VM_ENTRY_LOAD_IA32_EFER;
+ 	if (adjust_vmx_controls(min, opt, MSR_IA32_VMX_ENTRY_CTLS,
+ 				&_vmentry_control) < 0)
+ 		return -EIO;
+-- 
+2.34.1
+

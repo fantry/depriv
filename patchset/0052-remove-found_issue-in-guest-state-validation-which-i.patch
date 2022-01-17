@@ -1,0 +1,54 @@
+From 8c0b1a55230b76f488683630775b8261be39344d Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Wed, 17 Jun 2020 12:16:39 -0700
+Subject: [PATCH 052/140] remove found_issue in guest state validation which is
+ not per-CPU
+
+---
+ arch/x86/kvm/vmx/depriv.c | 14 ++------------
+ 1 file changed, 2 insertions(+), 12 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 59594eba29b6..830388e57251 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -63,15 +63,10 @@ static struct semaphore depriv_cpu_count_sema;
+ static DEFINE_PER_CPU(struct vmcs *, depriv_vmcs);
+ static DEFINE_PER_CPU(void *, depriv_cpu_state);
+ 
+-// found_issue should be per-CPU */
+-static bool found_issue = false;
+-
+ #define check(_c) do {							\
+-	if (!(_c)) {							\
+-		pr_err("depriv: guest state check failed (%d): %s\n",	\
++	if (!(_c))							\
++		pr_err("depriv: invalid guest state (%d): %s\n",	\
+ 		       __LINE__, #_c);					\
+-		found_issue = true;					\
+-	}								\
+ } while (0)
+ 
+ #define CHECK_VMX_CTLS(ctls, val)					\
+@@ -281,8 +276,6 @@ static void vmx_check_guest_state(void)
+ 
+ 	u8 seg;
+ 
+-	found_issue = false;
+-
+ 	// 26.2.1.1: VM-Execution Control Fields
+ 	CHECK_VMX_CTLS(pin_based_exec_ctrl, pin_based_ctrls);
+ 	CHECK_VMX_CTLS(cpu_based_exec_ctrl, proc_based_ctrls);
+@@ -522,9 +515,6 @@ static void vmx_check_guest_state(void)
+ 		check(!(!(rflags & X86_EFLAGS_TF) || (debug_ctrl & 0x2)) ||
+ 		      !(pending_dbg_exceptions & 0x00004000));
+ 	}
+-
+-	if (!found_issue)
+-		pr_info("depriv: validated VMCS guest state\n");
+ }
+ 
+ static __init int adjust_vmx_controls(u32 ctl_min, u32 ctl_opt,
+-- 
+2.34.1
+

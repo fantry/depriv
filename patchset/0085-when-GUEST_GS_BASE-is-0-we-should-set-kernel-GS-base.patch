@@ -1,0 +1,227 @@
+From a45f65058f720175ab24b284004c8bd6654dfe2d Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Mon, 22 Jun 2020 23:29:10 -0700
+Subject: [PATCH 085/140] when GUEST_GS_BASE is 0, we should set kernel GS base
+ to HOST_GS_BASE
+
+---
+ arch/x86/kvm/vmx/depriv.c         | 108 +++++++++++++++---------------
+ arch/x86/kvm/vmx/depriv_handler.c |   4 +-
+ 2 files changed, 55 insertions(+), 57 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 1d0c89ee3b52..9e84d6381bec 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -18,14 +18,17 @@
+ MODULE_AUTHOR("Xin Li");
+ MODULE_LICENSE("GPL");
+ 
+-static bool __read_mostly test_handle_vmlaunch_failure = 0;
+-module_param(test_handle_vmlaunch_failure, bool, S_IRUGO);
++static bool __read_mostly test_early_invalid_state = 1;
++module_param(test_early_invalid_state, bool, S_IRUGO);
++
++static bool __read_mostly test_handle_invalid_host_state = 0;
++module_param(test_handle_invalid_host_state, bool, S_IRUGO);
+ 
+ static bool __read_mostly test_handle_invalid_guest_state = 0;
+ module_param(test_handle_invalid_guest_state, bool, S_IRUGO);
+ 
+-static bool __read_mostly test_handle_vmresume_failure = 0;
+-module_param(test_handle_vmresume_failure, bool, S_IRUGO);
++static bool __read_mostly debug_host_in_non_root_mode = 0;
++module_param(debug_host_in_non_root_mode, bool, S_IRUGO);
+ 
+ static bool __read_mostly call_extra_exit_handlers = 1;
+ module_param(call_extra_exit_handlers, bool, S_IRUGO);
+@@ -58,7 +61,6 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ #define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(0 * 8)
+ #define DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE	(1 * 8)
+ #define DEPRIV_HOST_STACK_IRET_STACK		(2 * 8)
+-#define DEPRIV_HOST_STACK_DEBUG_HOST		(3 * 8)
+ 
+ #define DEPRIV_IRET_STACK_GUEST_RIP		(0 * 8)
+ #define DEPRIV_IRET_STACK_GUEST_CS		(1 * 8)
+@@ -570,7 +572,8 @@ static void vmx_depriv_cpu(void *info)
+ 
+ 	// the 2nd page of host state
+ 	msr_bitmap = host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
+-	memset(msr_bitmap, intercept_msr ? 1 : 0, PAGE_SIZE);
++	if (intercept_msr)
++		memset(msr_bitmap, 0xffffffff, PAGE_SIZE);
+ 	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+ 
+ 	vmx_depriv_cpu_state();
+@@ -596,10 +599,10 @@ static void vmx_depriv_cpu(void *info)
+ 
+ 	pr_debug("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n", cpu, rip, rsp);
+ 
+-	if (test_handle_vmlaunch_failure)
++	if (test_early_invalid_state && test_handle_invalid_host_state)
+ 		vmcs_write32(CR3_TARGET_COUNT, 0x100000);
+ 
+-	if (test_handle_invalid_guest_state)
++	if (test_early_invalid_state && test_handle_invalid_guest_state)
+ 		vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
+ 
+ 	/*
+@@ -804,7 +807,7 @@ static inline u64 depriv_iret_stack_base(int cpu)
+ 	       CEA_ESTACK_SIZE(NMI) + 32 * 8;
+ }
+ 
+-void dump_va_page_table_entry(void *virtual_address);
++void dump_va_page_table_entry(unsigned long va);
+ 
+ #define	DEPRIV_IRET_STACK_RIP							\
+ 	(*(unsigned long *)(iret_stack_base + DEPRIV_IRET_STACK_GUEST_RIP))
+@@ -830,6 +833,36 @@ void dump_va_page_table_entry(void *virtual_address);
+ 
+ void depriv_continue_in_root_mode(void);
+ 
++static void vmx_depriv_debug_with_non_root_mode(void)
++{
++	int cpu = raw_smp_processor_id();
++	unsigned long gdt_base = vmcs_readl(HOST_GDTR_BASE), base;
++	struct desc_struct *dentry;
++	u16 seg;
++	bool is_segment = true;
++
++	vmcs_writel(GUEST_RIP, (unsigned long)depriv_continue_in_root_mode);
++
++	seg = vmcs_read16(HOST_CS_SELECTOR);
++	vmcs_write16(GUEST_CS_SELECTOR, seg);
++	DEPRIV_SELECTOR(CS, seg);
++
++	vmcs_writel(GUEST_RFLAGS, 0x2);
++	vmcs_writel(GUEST_RSP, depriv_iret_stack_base(cpu));
++
++	seg = vmcs_read16(HOST_SS_SELECTOR);
++	vmcs_write16(GUEST_SS_SELECTOR, seg);
++	DEPRIV_SELECTOR(SS, seg);
++
++	vmcs_writel(GUEST_CR3, vmcs_readl(HOST_CR3));
++
++	if (test_handle_invalid_host_state)
++		vmcs_write32(CR3_TARGET_COUNT, 0);
++
++	if (test_handle_invalid_guest_state)
++		vmcs_write32(GUEST_TR_AR_BYTES, 0x008b);
++}
++
+ /*
+  * sync guest state to host w/o changing guest state
+  */
+@@ -845,48 +878,15 @@ bool vmx_repriv_cpu_state(void)
+ 	vmx_repriv_cpu_desc_tables();
+ 
+ 	cpumask_set_cpu(cpu, &depriv_cpu_root_mode_mask);
+-
+-	dump_va_page_table_entry((void *)iret_stack_base);
+-
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK;
+-
+-	pr_info("depriv: cpu%d iret stack base %#lx: %#lx:%#lx  %#lx %#lx:%#lx\n",
+-		cpu, iret_stack_base,
+-		*((unsigned long *)(iret_stack_base + 0x8)),
+-		*((unsigned long *)(iret_stack_base + 0x0)),
+-		*((unsigned long *)(iret_stack_base + 0x10)),
+-		*((unsigned long *)(iret_stack_base + 0x20)),
+-		*((unsigned long *)(iret_stack_base + 0x18)));
+-
+ 	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_IRET_STACK) = iret_stack_base;
+ 
+-	if (*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_DEBUG_HOST)) {
+-		unsigned long gdt_base = vmcs_readl(HOST_GDTR_BASE), base;
+-		struct desc_struct *dentry;
+-		u16 seg;
+-		bool is_segment = true;
+-
+-		vmcs_writel(GUEST_RIP, (unsigned long)depriv_continue_in_root_mode);
+-
+-		seg = vmcs_read16(HOST_CS_SELECTOR);
+-		vmcs_write16(GUEST_CS_SELECTOR, seg);
+-		DEPRIV_SELECTOR(CS, seg);
+-
+-		vmcs_writel(GUEST_RFLAGS, 0x2);
+-		vmcs_writel(GUEST_RSP, iret_stack_base);
+-
+-		seg = vmcs_read16(HOST_SS_SELECTOR);
+-		vmcs_write16(GUEST_SS_SELECTOR, seg);
+-		DEPRIV_SELECTOR(SS, seg);
+-
+-		vmcs_writel(GUEST_CR3, vmcs_readl(HOST_CR3));
+-
+-		vmcs_write32(EXCEPTION_BITMAP, 0xffffffff);
+-		vmcs_write32(GUEST_TR_AR_BYTES, 0x008b);
+-
+-		vmx_validate_guest_state();
+-		dump_vmcs();
++	if (!vmcs_readl(GUEST_GS_BASE))
++		wrmsrl(MSR_KERNEL_GS_BASE, vmcs_readl(HOST_GS_BASE));
+ 
++	/* powerful switch to debug issues in non-root mode */
++	if (debug_host_in_non_root_mode) {
++		vmx_depriv_debug_with_non_root_mode();
+ 		return false;
+ 	}
+ 
+@@ -944,8 +944,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		pr_info("depriv: cpu%d (%ld) exit reason: %d cpu mask: %*pb[l]\n",
+ 			cpu, counter, reason, cpumask_pr_args(&depriv_cpu_root_mode_mask));
+ 
+-	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_DEBUG_HOST) = 0;
+-
+ 	switch (reason) {
+ 	case EXIT_REASON_CPUID: {
+ 		if (!(counter % log_mod))
+@@ -957,12 +955,12 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			     (unsigned int *)&regs[VCPU_REGS_RCX],
+ 			     (unsigned int *)&regs[VCPU_REGS_RDX]);
+ 
+-		if (test_handle_vmresume_failure && counter > 22000) {
+-			pr_info("depriv: cpu%d (%ld) triggering vmresume fail at %#lx\n",
+-				cpu, counter, rip);
+-			//vmcs_write32(CR3_TARGET_COUNT, 0x100000);
+-			vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
+-			*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_DEBUG_HOST) = 1;
++		if (!test_early_invalid_state && counter > 5000) {
++			if (test_handle_invalid_host_state)
++				vmcs_write32(CR3_TARGET_COUNT, 0x100000);
++
++			if (test_handle_invalid_guest_state)
++				vmcs_write32(GUEST_TR_AR_BYTES, 0x009b);
+ 		}
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+diff --git a/arch/x86/kvm/vmx/depriv_handler.c b/arch/x86/kvm/vmx/depriv_handler.c
+index 9f44e95a5874..9a12fe683cf3 100644
+--- a/arch/x86/kvm/vmx/depriv_handler.c
++++ b/arch/x86/kvm/vmx/depriv_handler.c
+@@ -45,14 +45,13 @@ void dump_guest_insn(unsigned long rip, int insn_len, char *insn)
+ 	insn[3 * i] = '\0';
+ }
+ 
+-void dump_va_page_table_entry(void *virtual_address)
++void dump_va_page_table_entry(unsigned long va)
+ {
+ 	int cpu = raw_smp_processor_id(), i;
+ 	unsigned long host_cr3 = vmcs_readl(HOST_CR3);
+ 	unsigned long guest_cr3 = vmcs_readl(GUEST_CR3);
+ 	unsigned long *host_pte;
+ 	unsigned long *guest_pte;
+-	unsigned long va = (unsigned long)virtual_address;
+ 	unsigned int va_shift = PGDIR_SHIFT;
+ 	bool host_pte_valid = true;
+ 	bool guest_pte_valid = true;
+@@ -213,6 +212,7 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 		pr_info("depriv: cpu%d (%ld) rip: %#lx rsp: %#lx insn: %s\n",
+ 			cpu, cnt, rip, rsp, insn);
+ 		native_write_cr2(cr2);
++		dump_va_page_table_entry(cr2);
+ 		continue_in_root_mode = false;
+ 	} else if (is_gp_fault(intr_info))
+ 		continue_in_root_mode = false;
+-- 
+2.34.1
+

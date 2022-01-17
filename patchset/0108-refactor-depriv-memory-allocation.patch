@@ -1,0 +1,607 @@
+From ec87b364f5069d9a4a3321734eb83726a29b134b Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 8 Sep 2020 12:14:21 -0700
+Subject: [PATCH 108/140] refactor depriv memory allocation
+
+---
+ arch/x86/depriv/vmx/depriv.c           | 291 ++++++++++++++-----------
+ arch/x86/depriv/vmx/depriv_entry.S     |  12 +-
+ arch/x86/depriv/vmx/depriv_validator.c |   2 +-
+ arch/x86/depriv/vmx/vmx.h              |   3 +-
+ 4 files changed, 173 insertions(+), 135 deletions(-)
+
+diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
+index 9c09827faef3..3e47900eff3f 100644
+--- a/arch/x86/depriv/vmx/depriv.c
++++ b/arch/x86/depriv/vmx/depriv.c
+@@ -9,9 +9,8 @@
+ #include <linux/delay.h>
+ #include <linux/depriv_types.h>
+ #include <linux/module.h>
+-#include <linux/semaphore.h>
++#include <linux/slab.h>
+ 
+-#include <asm/atomic.h>
+ #include <asm/debugreg.h>
+ #include <asm/desc.h>
+ #include <asm/msr.h>
+@@ -52,11 +51,16 @@ static bool __read_mostly intercept_cr3 = 0;
+ module_param(intercept_cr3, bool, S_IRUGO);
+ 
+ /*
+- * host state memory buffer page order
++ * host state buffer page order is 2, meaning 4 pages will be allocated:
++ *	page 0: trampoline stack
++ *	page 1: VMCS MSR bitmap
++ *	page 2: root mode PGD page
++ *	page 3: VMCS for VMXON
+  */
+ #define DEPRIV_CPU_STATE_PAGE_ORDER		2
+ #define DEPRIV_CPU_STATE_BUFFER_SIZE		(PAGE_SIZE << DEPRIV_CPU_STATE_PAGE_ORDER)
+-#define DEPRIV_CPU_STATE_ROOT_PGD		(DEPRIV_CPU_STATE_BUFFER_SIZE - PAGE_SIZE * 2)
++#define DEPRIV_CPU_STATE_VMXON_VMCS		(DEPRIV_CPU_STATE_BUFFER_SIZE - PAGE_SIZE)
++#define DEPRIV_CPU_STATE_ROOT_PGD		(DEPRIV_CPU_STATE_VMXON_VMCS - PAGE_SIZE)
+ #define DEPRIV_CPU_STATE_VMCS_MSR_BITMAP	(DEPRIV_CPU_STATE_ROOT_PGD - PAGE_SIZE)
+ 
+ /*
+@@ -78,18 +82,14 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ struct vmcs_config depriv_vmcs_config;
+ 
+ static struct cpumask cpu_vmx_operation_mask;
+-static atomic_t depriv_cpu_count;
+-static struct semaphore depriv_cpu_count_sema;
+ static struct cpumask cpu_depriv_mode_mask;
+-static bool volatile depriv_cleanup = false;
+-
+-static DEFINE_PER_CPU(struct vmcs *, vmxarea) = NULL;
+-static DEFINE_PER_CPU(struct vmcs *, depriv_vmcs) = NULL;
++static bool volatile depriv_exiting = false;
+ 
+ /*
+  * We maintain a per-CPU linked-list of VMCS loaded on that CPU.
+  */
+-static DEFINE_PER_CPU(struct list_head, loaded_vmcss_on_cpu);
++static struct kmem_cache *loaded_vmcs_cache = NULL;
++static DEFINE_PER_CPU(struct list_head, loaded_vmcss);
+ 
+ static inline bool cpu_has_load_perf_global_ctrl(void)
+ {
+@@ -227,6 +227,8 @@ static int __init setup_vmcs_config(void)
+ 	depriv_vmcs_config.vmexit_ctrl         = _vmexit_control;
+ 	depriv_vmcs_config.vmentry_ctrl        = _vmentry_control;
+ 
++	pr_info("depriv: VMCS size: %d (size order %d)\n",
++		depriv_vmcs_config.size, depriv_vmcs_config.order);
+ 	pr_info("depriv: pin based controls: %#x\n",
+ 		depriv_vmcs_config.pin_based_exec_ctrl);
+ 	pr_info("depriv: processor based controls: %#x\n",
+@@ -586,12 +588,16 @@ static void vmx_depriv_cpu_state(void)
+ static void vmclear_local_loaded_vmcss(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	struct loaded_vmcs *v, *n;
++	struct depriv_loaded_vmcs *v, *n;
+ 
+-	list_for_each_entry_safe(v, n, &per_cpu(loaded_vmcss_on_cpu, cpu),
++	list_for_each_entry_safe(v, n, &per_cpu(loaded_vmcss, cpu),
+ 				 loaded_vmcss_on_cpu_link) {
+ 		vmcs_clear(v->vmcs);
+-		v->launched = 0;
++		free_vmcs(v->vmcs);
++		v->vmcs = NULL;
++		v->launched = false;
++		list_del(&v->loaded_vmcss_on_cpu_link);
++		kmem_cache_free(loaded_vmcs_cache, v);
+ 	}
+ }
+ 
+@@ -606,20 +612,16 @@ static void vmx_cpu_vmxoff(void)
+ static void hardware_disable(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	struct vmcs *vmcs = per_cpu(vmxarea, cpu);
+ 
+-	if (!vmcs)
++	vmclear_local_loaded_vmcss();
++
++	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
+ 		return;
+ 
+-	vmclear_local_loaded_vmcss();
+ 	vmx_cpu_vmxoff();
+-	free_vmcs(vmcs);
+-
+-	BUG_ON(!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask));
+ 	cpumask_clear_cpu(cpu, &cpu_vmx_operation_mask);
+ 
+-	if (atomic_dec_and_test(&depriv_cpu_count))
+-		up(&depriv_cpu_count_sema);
++	pr_info("depriv: VMX disabled on cpu%d\n", cpu);
+ }
+ 
+ /*
+@@ -629,7 +631,8 @@ static void vmx_repriv_cpu_release_resources(void)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+-	struct vmcs *vmcs = per_cpu(depriv_vmcs, cpu);
++
++	hardware_disable();
+ 
+ 	if (host_cpu_state) {
+ 		per_cpu(depriv_cpu_state, cpu) = NULL;
+@@ -637,15 +640,6 @@ static void vmx_repriv_cpu_release_resources(void)
+ 		free_pages((unsigned long)host_cpu_state, DEPRIV_CPU_STATE_PAGE_ORDER);
+ 		pr_info("depriv: repriv cpu%d released cpu state buffer\n", cpu);
+ 	}
+-
+-	if (vmcs) {
+-		per_cpu(depriv_vmcs, cpu) = NULL;
+-		vmcs_clear(vmcs);
+-		free_vmcs(vmcs);
+-		pr_info("depriv: repriv cpu%d released root mode VMCS\n", cpu);
+-	}
+-
+-	hardware_disable();
+ }
+ 
+ static inline unsigned long depriv_iret_trampoline_stack(int cpu)
+@@ -656,7 +650,7 @@ static inline unsigned long depriv_iret_trampoline_stack(int cpu)
+ int asm_vmx_depriv(bool launch);
+ void vmx_depriv_rip(void);
+ 
+-void vmx_validate_guest_state(void);
++void vmx_validate_vmcs(void);
+ 
+ /*
+  * WARNING: must be called with interrupt disabled!
+@@ -665,10 +659,11 @@ static bool __vmx_depriv(bool launch)
+ {
+ 	int cpu = raw_smp_processor_id();
+ 	unsigned long rip, rsp, rflags;
+-	static atomic64_t depriv_enter_count;
+-	long c;
+ 	int depriv_result;
+ 
++	if (depriv_exiting)
++		return false;
++
+ 	rip = (unsigned long)vmx_depriv_rip;
+ 	vmcs_writel(GUEST_RIP, rip);
+ 
+@@ -684,51 +679,36 @@ static bool __vmx_depriv(bool launch)
+ 		     : "=m"(rflags) :: "%rax");
+ 	vmcs_writel(GUEST_RFLAGS, rflags);
+ 
+-	c = atomic64_inc_return(&depriv_enter_count);
+-	if (launch || !(c % log_mod))
+-		pr_info("depriv: cpu%d (%ld) deprivileging: rip: %#lx rsp: %#lx\n", cpu, c, rip, rsp);
++	if (launch)
++		pr_info("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n", cpu, rip, rsp);
+ 
+ 	/*
+ 	 * Should we save/restore general purpose registers around asm_vmx_depriv?
+ 	 */
+ 	depriv_result = asm_vmx_depriv(launch);
+-	if (!depriv_result) { // switched to non-root mode
++	switch (depriv_result) {
++	case 0: // switched to non-root mode
+ 		cpumask_set_cpu(cpu, &cpu_depriv_mode_mask);
+ 		return true;
+-	}
+-
+ 	// still in root mode
+-	if (depriv_result == 1)
+-		pr_err("depriv: cpu%d launch failed\n", cpu);
+-	else if (depriv_result == 2) {
++	case 1:
++		pr_err("depriv: cpu%d launch failed with invalid host state\n", cpu);
++		break;
++	case 2:
++		pr_err("depriv: cpu%d launch failed with invalid guest state\n", cpu);
++		break;
++	case 3:
+ 		pr_err("depriv: cpu%d resume failed\n", cpu);
+-		// skip the following vmx_repriv_cpu_release_resources()
+-		return true;
+-	} else
+-		pr_err("depriv: cpu%d unknown deprivilege error %d\n",
+-		       cpu, depriv_result);
++		break;
++	default:
++		pr_err("depriv: cpu%d unknown deprivilege error %d\n", cpu, depriv_result);
++		BUG();
++	}
+ 
+-	vmx_validate_guest_state();
++	vmx_validate_vmcs();
+ 	return false;
+ }
+ 
+-static struct vmcs *alloc_vmcs(void)
+-{
+-	int cpu = raw_smp_processor_id();
+-	int node = cpu_to_node(cpu);
+-	struct page *pages;
+-	struct vmcs *vmcs;
+-
+-	pages = __alloc_pages_node(node, GFP_KERNEL, depriv_vmcs_config.order);
+-	if (!pages)
+-		return NULL;
+-
+-	vmcs = page_address(pages);
+-	memset(vmcs, 0, depriv_vmcs_config.size);
+-	vmcs->hdr.revision_id = depriv_vmcs_config.revision_id;
+-	return vmcs;
+-}
+-
+ static int vmx_cpu_vmxon(u64 vmxon_pointer)
+ {
+ 	u64 msr;
+@@ -751,71 +731,63 @@ static int vmx_cpu_vmxon(u64 vmxon_pointer)
+ 	return -EFAULT;
+ }
+ 
+-static int hardware_enable(void)
++static int hardware_enable(struct vmcs *vmcs)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	struct vmcs *vmcs;
+ 	int r;
+ 
+ 	if (cr4_read_shadow() & X86_CR4_VMXE)
+ 		return -EBUSY;
+ 
+-	vmcs = alloc_vmcs();
+-	if (!vmcs)
+-		return -ENOMEM;
++	memset(vmcs, 0, depriv_vmcs_config.size);
++	vmcs->hdr.revision_id = depriv_vmcs_config.revision_id;
+ 
+ 	r = vmx_cpu_vmxon(__pa(vmcs));
+-	if (r) {
+-		free_vmcs(vmcs);
++	if (r)
+ 		return r;
+-	}
+ 
+ 	pr_info("depriv: VMX enabled on cpu%d\n", cpu);
++
+ 	ept_sync_global();
+ 
+-	atomic_inc(&depriv_cpu_count);
+ 	BUG_ON(cpumask_test_cpu(cpu, &cpu_vmx_operation_mask));
+ 	cpumask_set_cpu(cpu, &cpu_vmx_operation_mask);
+ 
+-	BUG_ON(per_cpu(vmxarea, cpu));
+-	per_cpu(vmxarea, cpu) = vmcs;
+-	INIT_LIST_HEAD(&per_cpu(loaded_vmcss_on_cpu, cpu));
++	INIT_LIST_HEAD(&per_cpu(loaded_vmcss, cpu));
+ 	return 0;
+ }
+ 
++static struct vmcs *alloc_vmcs(void)
++{
++	int cpu = raw_smp_processor_id();
++	struct page *pages;
++	struct vmcs *vmcs;
++
++	pages = __alloc_pages_node(cpu_to_node(cpu), GFP_KERNEL, depriv_vmcs_config.order);
++	if (!pages)
++		return NULL;
++
++	vmcs = page_address(pages);
++	memset(vmcs, 0, depriv_vmcs_config.size);
++	vmcs->hdr.revision_id = depriv_vmcs_config.revision_id;
++	return vmcs;
++}
++
+ static void vmx_depriv_cpu(void *info)
+ {
+ 	int cpu = raw_smp_processor_id();
+-	int node = cpu_to_node(cpu);
+-	struct vmcs *vmcs = NULL;
++	struct depriv_loaded_vmcs *loaded_vmcs = NULL;
+ 	struct page *page = NULL;
+ 	void *host_cpu_state = NULL;
++	struct vmcs *vmcs = NULL;
+ 	void *host_cr3_va = NULL;
+ 	unsigned long cr3_pa = (unsigned long)info;
+ 	void *msr_bitmap = NULL;
+ 	unsigned long host_rsp;
+ 	int r;
+ 
+-	r = hardware_enable();
+-	if (r) {
+-		pr_err("depriv: vmxon error %d, unable to enable VMX on cpu%d\n", r, cpu);
+-		goto error;
+-	}
+-
+-	vmcs = alloc_vmcs();
+-	if (!vmcs) {
+-		pr_err("depriv: unable to allocate VMCS for cpu%d\n", cpu);
+-		goto error;
+-	}
+-
+-	vmcs_clear(vmcs);
+-	vmcs_load(vmcs);
+-	vmcs_write64(VMCS_LINK_POINTER, ~0ull);
+-	indirect_branch_prediction_barrier();
+-	per_cpu(depriv_vmcs, cpu) = vmcs;
+-
+ 	// memory for root mode VM exit handler
+-	page = __alloc_pages_node(node, GFP_KERNEL, DEPRIV_CPU_STATE_PAGE_ORDER);
++	page = __alloc_pages_node(cpu_to_node(cpu), GFP_KERNEL, DEPRIV_CPU_STATE_PAGE_ORDER);
+ 	if (!page) {
+ 		pr_err("depriv: unable to allocate host state buffer for cpu%d\n", cpu);
+ 		goto error;
+@@ -825,20 +797,52 @@ static void vmx_depriv_cpu(void *info)
+ 	memset(host_cpu_state, 0, DEPRIV_CPU_STATE_BUFFER_SIZE);
+ 	per_cpu(depriv_cpu_state, cpu) = host_cpu_state;
+ 
+-	// last 2 pages of host state
++	// page 3 of host state
++	vmcs = (struct vmcs *)(host_cpu_state + DEPRIV_CPU_STATE_VMXON_VMCS);
++	r = hardware_enable(vmcs);
++	if (r) {
++		pr_err("depriv: vmxon error %d, unable to enable VMX on cpu%d\n", r, cpu);
++		goto error;
++	}
++
++	// page 2 of host state
+ 	host_cr3_va = host_cpu_state + DEPRIV_CPU_STATE_ROOT_PGD;
+ 	memcpy(host_cr3_va, __va(cr3_pa), PAGE_SIZE);
+-	vmcs_writel(HOST_CR3, __pa(host_cr3_va));
+ 
+-	// the 2nd page of host state
++	// page 1 of host state
+ 	msr_bitmap = host_cpu_state + DEPRIV_CPU_STATE_VMCS_MSR_BITMAP;
+ 	if (intercept_msr)
+ 		memset(msr_bitmap, 0xffffffff, PAGE_SIZE);
++
++	vmcs = alloc_vmcs();
++	if (!vmcs) {
++		pr_err("depriv: unable to allocate VMCS for cpu%d\n", cpu);
++		goto error;
++	}
++
++	loaded_vmcs = kmem_cache_zalloc(loaded_vmcs_cache, GFP_KERNEL_ACCOUNT);
++	if (!loaded_vmcs) {
++		pr_err("depriv: unable to allocate loaded VMCS for cpu%d\n", cpu);
++		free_vmcs(vmcs);
++		goto error;
++	}
++
++	loaded_vmcs->vmcs = vmcs;
++	loaded_vmcs->launched = false;
++	list_add(&loaded_vmcs->loaded_vmcss_on_cpu_link, &per_cpu(loaded_vmcss, cpu));
++
++	vmcs_clear(vmcs);
++	vmcs_load(vmcs);
++	indirect_branch_prediction_barrier();
++
++	vmcs_write64(VMCS_LINK_POINTER, ~0ull);
++	vmcs_writel(HOST_CR3, __pa(host_cr3_va));
+ 	vmcs_write64(MSR_BITMAP, __pa(msr_bitmap));
+ 
+ 	vmx_depriv_cpu_state();
+ 
+-	// reserve extra DEPRIV_HOST_STACK_RESERVED_BYTES bytes for reprivileging host
++	// page 0 of host state: reserve extra DEPRIV_HOST_STACK_RESERVED_BYTES bytes
++	// for reprivileging host
+ 	host_rsp = (unsigned long)msr_bitmap - DEPRIV_HOST_STACK_RESERVED_BYTES;
+ 	vmcs_writel(HOST_RSP, host_rsp);
+ 
+@@ -1011,7 +1015,18 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+  */
+ static void vmx_repriv(void)
+ {
+-	asm volatile("vmcall");
++	int cpu = raw_smp_processor_id();
++	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
++		return;
++
++	asm_volatile_goto("1: vmcall\n\t"
++			  _ASM_EXTABLE(1b, %l[fault])
++			  : : : : fault);
++	return;
++
++fault:
++	// vmcall faulted, was in root mode already
++	vmx_repriv_cpu_release_resources();
+ }
+ 
+ static void vmx_repriv_cpu(void *info)
+@@ -1127,7 +1142,7 @@ bool vmx_repriv_cpu_state(void)
+ 		return false;
+ 	}
+ 
+-	if (depriv_cleanup) {
++	if (depriv_exiting) {
+ 		pr_info("depriv: cpu%d switching to root mode GS base %#lx kernel GS base %#lx\n",
+ 			cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ 		vmx_repriv_cpu_release_resources();
+@@ -1175,12 +1190,12 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		if (rip == (unsigned long)vmx_depriv_rip)
+ 			regs[__VCPU_REGS_RAX] = 2;
+ 
+-		vmx_validate_guest_state();
++		vmx_validate_vmcs();
+ 		DEPRIV_SWITCH_TO_ROOT_MODE;
+ 	}
+ 
+ 	if (!(counter % log_mod))
+-		pr_info("depriv: cpu%d (%ld) exit reason: %d cpu mask: %*pb[l]\n",
++		pr_info("depriv: cpu%d (%ld) exit reason: %d cpu depriv mode mask: %*pb[l]\n",
+ 			cpu, counter, reason, cpumask_pr_args(&cpu_depriv_mode_mask));
+ 
+ 	switch (reason) {
+@@ -1210,7 +1225,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		break;
+ 
+ 	case EXIT_REASON_VMCALL:
+-		pr_debug("depriv: cpu%d (%ld) exit reason: %d cpu mask: %*pb[l]\n",
++		pr_debug("depriv: cpu%d (%ld) exit reason: %d cpu depriv mode mask: %*pb[l]\n",
+ 			 cpu, counter, reason, cpumask_pr_args(&cpu_depriv_mode_mask));
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+@@ -1239,6 +1254,10 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ static bool vmx_depriv(void)
+ {
++	int cpu = raw_smp_processor_id();
++	if (!cpumask_test_cpu(cpu, &cpu_vmx_operation_mask))
++		return false;
++
+ 	return __vmx_depriv(false);
+ }
+ 
+@@ -1247,30 +1266,48 @@ static int __init vmx_depriv_init(void)
+ 	int r = setup_vmcs_config();
+ 	if (r) {
+ 		pr_err("depriv: error setting up deprivilege VMCS config\n");
+-		return r;
++		goto out;
+ 	}
+ 
+-	depriv_ops.enter = vmx_depriv;
+-	depriv_ops.exit = vmx_repriv;
++	r = -ENOMEM;
++	loaded_vmcs_cache = kmem_cache_create("depriv_loaded_vmcs", sizeof(struct depriv_loaded_vmcs),
++					      __alignof__(struct depriv_loaded_vmcs), SLAB_ACCOUNT,
++					      NULL);
++	if (!loaded_vmcs_cache) {
++		pr_err("depriv: failed to allocate cache for loaded VMCS\n");
++		goto out;
++	}
+ 
+-	sema_init(&depriv_cpu_count_sema, 0);
+-	on_each_cpu(vmx_depriv_cpu, (void *)read_cr3_pa(), 0);
++	r = -EIO;
++	on_each_cpu(vmx_depriv_cpu, (void *)read_cr3_pa(), 1);
++	pr_info("depriv: cpu vmx operation mask: %*pb[l]\n", cpumask_pr_args(&cpu_vmx_operation_mask));
++	if (cpumask_empty(&cpu_vmx_operation_mask))
++		goto out_free_loaded_vmcs_cache;
+ 
+-	if (!atomic_read(&depriv_cpu_count))
+-		return -EIO;
++	depriv_ops.enter = vmx_depriv;
++	depriv_ops.exit = vmx_repriv;
+ 
+ 	pr_info("depriv: successfully initialized\n");
+ 	return 0;
++
++out_free_loaded_vmcs_cache:
++	kmem_cache_destroy(loaded_vmcs_cache);
++out:
++	return r;
+ }
+ 
+ static void __exit vmx_depriv_exit(void)
+ {
+-	int c = atomic_read(&depriv_cpu_count);
+-	if (!c) {
+-		pr_info("depriv: no cpus deprivileged");
+-		return;
++	if (cpumask_empty(&cpu_vmx_operation_mask)) {
++		pr_info("depriv: no cpus deprivileged\n");
++		goto exit;
+ 	}
+ 
++	depriv_exiting = true;
++
++	pr_info("depriv: %d cpus deprivileged, reprivileging...\n",
++		cpumask_weight(&cpu_vmx_operation_mask));
++
+ 	if (test_handle_invalid_host_state || test_handle_invalid_guest_state) {
+ 		test_early_invalid_state = true;
+ 		test_handle_invalid_host_state = false;
+@@ -1281,17 +1318,13 @@ static void __exit vmx_depriv_exit(void)
+ 		msleep(100);
+ 	}
+ 
+-	pr_info("depriv: %d cpus deprivileged, reprivileging...\n", c);
+-	depriv_cleanup = true;
+-	on_each_cpu(vmx_repriv_cpu, NULL, 0);
+-
+-	if (down_interruptible(&depriv_cpu_count_sema))
+-		pr_err("depriv: cpu count semaphore interrupted\n");
++	on_each_cpu(vmx_repriv_cpu, NULL, 1);
+ 
+-	pr_info("depriv: %d cpus still in non-root mode, cpu mask: %*pb[l]\n",
+-		atomic_read(&depriv_cpu_count), cpumask_pr_args(&cpu_vmx_operation_mask));
++	pr_info("depriv: successfully unloaded, cpu vmx operation mask: %*pb[l]\n",
++		cpumask_pr_args(&cpu_vmx_operation_mask));
+ 
+-	pr_info("depriv: successfully unloaded\n");
++exit:
++	kmem_cache_destroy(loaded_vmcs_cache);
+ }
+ 
+ module_init(vmx_depriv_init);
+diff --git a/arch/x86/depriv/vmx/depriv_entry.S b/arch/x86/depriv/vmx/depriv_entry.S
+index 7b77fb28fafc..ee937e107b54 100644
+--- a/arch/x86/depriv/vmx/depriv_entry.S
++++ b/arch/x86/depriv/vmx/depriv_entry.S
+@@ -89,16 +89,20 @@ SYM_FUNC_START(asm_vmx_depriv)
+ 	xor %rax, %rax
+ 	/* Enter non-root mode */
+ 	vmlaunch
+-	jmp 2f
++
++	/* vmlaunch failed, switch to root mode stask */
++	xor %rax, %rax
++	mov $1, %rax
++	ret
+ 
+ 1:	/* assuming vmresume will succeed */
+ 	xor %rax, %rax
+ 	/* Enter non-root mode */
+ 	vmresume
+ 
+-	/* vmlaunch failed, switch to root mode stask */
+-2:	xor %rax, %rax
+-	mov $1, %rax
++	/* vmresume failed, switch to root mode stask */
++	xor %rax, %rax
++	mov $3, %rax
+ 	ret
+ SYM_FUNC_END(asm_vmx_depriv)
+ 
+diff --git a/arch/x86/depriv/vmx/depriv_validator.c b/arch/x86/depriv/vmx/depriv_validator.c
+index 0d6b2d23feb5..8594b7d3ecad 100644
+--- a/arch/x86/depriv/vmx/depriv_validator.c
++++ b/arch/x86/depriv/vmx/depriv_validator.c
+@@ -208,7 +208,7 @@ static void vmx_validate_guest_selector(u8 seg, bool vm86_active,
+ 	check(limit >> 20 == 0 || ar & VMX_AR_G_MASK);
+ }
+ 
+-void vmx_validate_guest_state(void)
++void vmx_validate_vmcs(void)
+ {
+ 	u32 vmentry_ctl = vmcs_read32(VM_ENTRY_CONTROLS);
+ 	u32 vmexit_ctl = vmcs_read32(VM_EXIT_CONTROLS);
+diff --git a/arch/x86/depriv/vmx/vmx.h b/arch/x86/depriv/vmx/vmx.h
+index 389713e7c0b4..9e374e3a1912 100644
+--- a/arch/x86/depriv/vmx/vmx.h
++++ b/arch/x86/depriv/vmx/vmx.h
+@@ -3,6 +3,7 @@
+ #define __DEPRIV_X86_VMX_H
+ 
+ #include <linux/depriv_types.h>
++#include <linux/list.h>
+ 
+ #include <asm/bug.h>
+ #include <asm/page.h>
+@@ -320,7 +321,7 @@ static inline bool cpu_has_secondary_exec_ctrls(void)
+  * remember whether it was VMLAUNCHed, and maintain a linked list of all VMCSs
+  * loaded on this CPU (so we can clear them if the CPU goes down).
+  */
+-struct loaded_vmcs {
++struct depriv_loaded_vmcs {
+ 	struct vmcs *vmcs;
+ 	bool launched;
+ 	struct list_head loaded_vmcss_on_cpu_link;
+-- 
+2.34.1
+

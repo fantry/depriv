@@ -1,0 +1,52 @@
+From e8a3a14b2cda0f305f3e0b6b918c734641df6f44 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 23 Jun 2020 09:53:30 -0700
+Subject: [PATCH 087/140] also change to "switch to" in comments and log
+
+---
+ arch/x86/kvm/vmx/depriv.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 484b121c54a5..a9f126549f09 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -612,7 +612,7 @@ static void vmx_depriv_cpu(void *info)
+ 	vmx_depriv_result = vmx_depriv();
+ 	atomic_inc(&depriv_cpu_count);
+ 	if (!vmx_depriv_result)
+-		// continue in non-root mode...
++		// switched to non-root mode
+ 		return;
+ 
+ 	vmx_validate_guest_state();
+@@ -794,7 +794,7 @@ void vmx_repriv_cpu(void *info)
+ 	if (*to_root_mode == 1) {
+ 		vmx_depriv_vmcall();
+ 
+-		// continue in root mode...
++		// switched to root mode
+ 		pr_info("depriv: cpu%d reprivileged\n", cpu);
+ 	} else
+ 		pr_info("depriv: cpu%d already reprivileged\n", cpu);
+@@ -980,7 +980,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
+ 		if (*to_root_mode) {
+-			pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, continue in root mode\n",
++			pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, switch to root mode\n",
+ 				cpu, counter, rip);
+ 			vmcs_writel(GUEST_RIP, rip + insn_len);
+ 			DEPRIV_SWITCH_TO_ROOT_MODE;
+@@ -997,7 +997,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+ 
+-		/* continue in root mode */
++		/* switch to root mode */
+ 		dump_guest_insn(rip, vmcs_read32(VM_EXIT_INSTRUCTION_LEN), insn);
+ 		pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx insn: %s\n",
+ 			cpu, counter, reason, rip, rsp, insn);
+-- 
+2.34.1
+

@@ -1,0 +1,95 @@
+From 7a8a9670d4c8a3ba5452c1656a26fb53d3ab41b3 Mon Sep 17 00:00:00 2001
+From: Xin Li <lxin@vmware.com>
+Date: Fri, 19 Jun 2020 16:26:04 -0700
+Subject: [PATCH 067/140] replace *cnt with counter
+
+---
+ arch/x86/kvm/vmx/depriv.c | 23 +++++++++++++----------
+ 1 file changed, 13 insertions(+), 10 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index aa2c377d668b..bbc9335207d3 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -850,6 +850,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ {
+ 	unsigned long host_rsp = vmcs_readl(HOST_RSP);
+ 	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
++	unsigned long counter;
+ 	unsigned long rip = vmcs_readl(GUEST_RIP);
+ 	unsigned long rsp = vmcs_readl(GUEST_RSP);
+ 	int cpu = raw_smp_processor_id();
+@@ -859,10 +860,11 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	regs[VCPU_REGS_RSP] = rsp;
+ 
+ 	(*cnt)++;
++	counter = *cnt;
+ 
+ 	if (reason & VMX_EXIT_REASONS_FAILED_VMENTRY) {
+ 		pr_err("depriv: cpu%d (%ld) VM-entry failed @ rip: %#lx rsp: %#lx\n",
+-		       cpu, *cnt, rip, rsp);
++		       cpu, counter, rip, rsp);
+ 		reason &= ~VMX_EXIT_REASONS_FAILED_VMENTRY;
+ 
+ 		if (rip == (unsigned long)vmx_depriv_rip)
+@@ -872,14 +874,15 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 	}
+ 
+-	if (!(*cnt % log_mod))
++	if (!(counter % log_mod))
+ 		pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx\n",
+-			cpu, *cnt, reason, rip, rsp);
++			cpu, counter, reason, rip, rsp);
+ 
+ 	switch (reason) {
+ 	case EXIT_REASON_CPUID: {
+-		if (!(*cnt % log_mod))
+-			pr_info("depriv: cpu%d (%ld) cpuid[%#x]\n", cpu, *cnt, (u32)regs[VCPU_REGS_RAX]);
++		if (!(counter % log_mod))
++			pr_info("depriv: cpu%d (%ld) cpuid[%#x]\n",
++				cpu, counter, (u32)regs[VCPU_REGS_RAX]);
+ 
+ 		native_cpuid((unsigned int *)&regs[VCPU_REGS_RAX],
+ 			     (unsigned int *)&regs[VCPU_REGS_RBX],
+@@ -887,7 +890,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			     (unsigned int *)&regs[VCPU_REGS_RDX]);
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-		pr_debug("depriv: cpu%d (%ld) executed cpuid\n", cpu, *cnt);
++		pr_debug("depriv: cpu%d (%ld) executed cpuid\n", cpu, counter);
+ 		DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 	}
+ 
+@@ -898,16 +901,16 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 
+ 		if (*to_root_mode) {
+ 			pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, continue in root mode\n",
+-				cpu, *cnt, rip);
++				cpu, counter, rip);
+ 			DEPRIV_CONTINUE_IN_ROOT_MODE(insn_len);
+ 		} else {
+-			pr_debug("depriv: cpu%d (%ld) vmcall @ %#lx\n", cpu, *cnt, rip);
++			pr_debug("depriv: cpu%d (%ld) vmcall @ %#lx\n", cpu, counter, rip);
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 		}
+ 	}
+ 
+ 	default:
+-		if (call_extra_exit_handlers && !vmx_depriv_handle(reason, regs, *cnt)) {
++		if (call_extra_exit_handlers && !vmx_depriv_handle(reason, regs, counter)) {
+ 			if (reason != EXIT_REASON_EXCEPTION_NMI)
+ 				insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 			DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+@@ -916,7 +919,7 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		/* continue in root mode */
+ 		dump_guest_insn(rip, vmcs_read32(VM_EXIT_INSTRUCTION_LEN), insn);
+ 		pr_info("depriv: cpu%d (%ld) exit reason: %#x rip: %#lx rsp: %#lx insn: %s\n",
+-			cpu, *cnt, reason, rip, rsp, insn);
++			cpu, counter, reason, rip, rsp, insn);
+ 		DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 	}
+ }
+-- 
+2.34.1
+

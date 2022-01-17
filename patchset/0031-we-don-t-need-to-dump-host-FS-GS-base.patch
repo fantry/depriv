@@ -1,0 +1,107 @@
+From ce7403b690539637ca15a85a03023077e8e5752b Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 14 Jun 2020 23:06:35 -0700
+Subject: [PATCH 031/140] we don't need to dump host FS/GS base
+
+---
+ arch/x86/kvm/vmx/depriv.c | 34 +++++++++++++++-------------------
+ 1 file changed, 15 insertions(+), 19 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 3f1fb94d9fc6..571c768b5d81 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -1230,13 +1230,12 @@ static inline void vmx_repriv_cpu_segments(void)
+ 
+ 	sel = vmcs_read16(GUEST_FS_SELECTOR);
+ 	loadsegment(fs, sel);
+-	pr_info("depriv: repriv cpu%d FS = %#x\n", cpu, sel);
++	pr_info("depriv: repriv cpu%d FS selector: %#x\n", cpu, sel);
+ 	vmcs_write16(HOST_FS_SELECTOR, sel);
+ 
+ 	host_base = read_msr(MSR_FS_BASE);
+ 	base = vmcs_readl(GUEST_FS_BASE);
+-	pr_info("depriv: repriv cpu%d FS base %#lx : %#lx\n",
+-		cpu, host_base, base);
++	pr_info("depriv: repriv cpu%d FS base: %#lx\n", cpu, base);
+ 	if (host_base != base)
+ 		wrmsrl(MSR_FS_BASE, base);
+ 	vmcs_writel(HOST_FS_BASE, base);
+@@ -1248,13 +1247,11 @@ static inline void vmx_repriv_cpu_segments(void)
+ 
+ 	sel = vmcs_read16(GUEST_GS_SELECTOR);
+ 	load_gs_index(sel);
+-	pr_info("depriv: repriv cpu%d GS = %#x\n", cpu, sel);
++	pr_info("depriv: repriv cpu%d GS selector: %#x\n", cpu, sel);
+ 	vmcs_write16(HOST_GS_SELECTOR, sel);
+ 
+-	host_base = read_msr(MSR_GS_BASE);
+ 	base = vmcs_readl(GUEST_GS_BASE);
+-	pr_info("depriv: repriv cpu%d GS base %#lx : %#lx\n",
+-		cpu, host_base, base);
++	pr_info("depriv: repriv cpu%d GS base: %#lx\n", cpu, base);
+ }
+ 
+ static inline void vmx_repriv_cpu_ldtr(void)
+@@ -1438,7 +1435,7 @@ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ 	unsigned long base, last_base;
+ 
+ 	base = vmcs_readl(GUEST_FS_BASE);
+-	last_base = *(unsigned long *)(host_rsp + 0x38);
++	last_base = *(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_FS_BASE_OFFSET);
+ 
+ 	/*
+ 	 * it's NOT unexpected that they don't match, however if we intercept
+@@ -1449,7 +1446,7 @@ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ 			 cpu, *cnt, reason, base, last_base);
+ 
+ 	base = vmcs_readl(GUEST_GS_BASE);
+-	last_base = *(unsigned long *)(host_rsp + 0x30);
++	last_base = *(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_GUEST_GS_BASE_OFFSET);
+ 
+ 	/*
+ 	 * it's NOT unexpected that they don't match, however if we intercept
+@@ -1490,8 +1487,9 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	dump_fsgs_base(host_rsp, reason);
+ 	vmx_depriv_cpu_sync_fsgs_base(host_rsp, reason);
+ 
+-	pr_debug("depriv: cpu%d (%ld) exit reason:%#x rip:%#lx rsp:%#lx\n",
+-		 cpu, *cnt, reason, rip, rsp);
++	pr_info("depriv: cpu%d (%ld) exit reason: %d rip: %#lx rsp: %#lx FS base: %#lx\n",
++		cpu, *cnt, reason, rip, rsp, vmcs_readl(GUEST_FS_BASE));
++
+ 	if (enable_log) {
+ 		pr_info("depriv: cpu%d (%ld) exit reason:%#x rip:%#lx rsp:%#lx\n",
+ 			cpu, *cnt, reason, rip, rsp);
+@@ -1549,13 +1547,11 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			pr_info("depriv: cpu%d (%ld) injecting exception %d, continue in non-root mode\n",
+ 				cpu, *cnt, vector);
+ 
+-			pr_info("depriv: cpu%d (%ld) FS base %#lx : %#lx : %#lx\n",
+-				cpu, *cnt, read_msr(MSR_FS_BASE),
+-				vmcs_readl(HOST_FS_BASE), vmcs_readl(GUEST_FS_BASE));
++			pr_info("depriv: cpu%d (%ld) guest FS base: %#lx\n",
++				cpu, *cnt, vmcs_readl(GUEST_FS_BASE));
+ 
+-			pr_info("depriv: cpu%d (%ld) GS base %#lx : %#lx : %#lx : %#lx\n",
+-				cpu, *cnt, read_msr(MSR_GS_BASE), vmcs_readl(HOST_GS_BASE),
+-				vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
++			pr_info("depriv: cpu%d (%ld) guest GS base: %#lx guest kernel GS base: %#lx\n",
++				cpu, *cnt, vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ 
+ 			DEPRIV_DUMP_GPRS;
+ 			enable_log = true;
+@@ -1682,8 +1678,8 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			pr_info("depriv: cpu%d (%ld) GS base MSR: %#lx\n", cpu, *cnt, val);
+ 		} else if (rdmsrl_safe(ecx, (unsigned long long *)&val))
+ 			pr_info("depriv: cpu%d (%ld) MSR[%#x]: %#lx failed\n", cpu, *cnt, ecx, val);
+-
+-		pr_info("depriv: cpu%d (%ld) MSR[%#x]: %#lx\n", cpu, *cnt, ecx, val);
++		else
++			pr_info("depriv: cpu%d (%ld) MSR[%#x]: %#lx\n", cpu, *cnt, ecx, val);
+ 
+ 		if (ecx == 0x3b) {
+ 			cnt_0x3b++;
+-- 
+2.34.1
+

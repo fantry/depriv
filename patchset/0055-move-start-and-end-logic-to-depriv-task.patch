@@ -1,0 +1,244 @@
+From 80d4724a02b9f167292f02d96e41f2f16d1e5946 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 18 Jun 2020 10:48:40 -0700
+Subject: [PATCH 055/140] move start and end logic to depriv task
+
+---
+ arch/x86/kvm/vmx/depriv.c | 90 +++++++++++++++++----------------------
+ 1 file changed, 39 insertions(+), 51 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 784c8b471825..03d851865e26 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -54,11 +54,10 @@ module_param(depriv_print_mod, uint, 0444);
+ #define DEPRIV_HOST_STACK_VMCALL_TO_ROOT_MODE	(9 * 8)
+ 
+ static struct vmcs_config depriv_vmcs_conf;
+-static struct semaphore depriv_task_start_sema;
+-static struct semaphore depriv_task_end_sema;
+ static unsigned long depriv_task_cr3_pa;
+-static atomic_t depriv_cpu_count;
+ static struct semaphore depriv_cpu_count_sema;
++static atomic_t depriv_cpu_count;
++static struct semaphore depriv_repriv_sema;
+ 
+ static DEFINE_PER_CPU(struct vmcs *, depriv_vmcs);
+ static DEFINE_PER_CPU(void *, depriv_cpu_state);
+@@ -627,7 +626,7 @@ static int __init setup_depriv_vmcs_config(void)
+ 	return 0;
+ }
+ 
+-static void __init vmx_depriv_cpu_controls(void)
++static void vmx_depriv_cpu_controls(void)
+ {
+ 	vmcs_write32(PIN_BASED_VM_EXEC_CONTROL,
+ 		     depriv_vmcs_conf.pin_based_exec_ctrl);
+@@ -662,7 +661,7 @@ static void __init vmx_depriv_cpu_controls(void)
+ 	(X86_CR4_PVI | X86_CR4_DE | X86_CR4_PCE | X86_CR4_OSFXSR      \
+ 	 | X86_CR4_OSXMMEXCPT | X86_CR4_LA57 | X86_CR4_TSD)
+ 
+-static void __init vmx_depriv_cpu_crs(void)
++static void vmx_depriv_cpu_crs(void)
+ {
+ 	unsigned long cr0, cr4;
+ 	u64 pat, efer;
+@@ -698,13 +697,13 @@ static void __init vmx_depriv_cpu_crs(void)
+ 	}
+ }
+ 
+-static inline bool __init is_desc_16byte(struct desc_struct *dentry)
++static inline bool is_desc_16byte(struct desc_struct *dentry)
+ {
+ 	// s = 0 : system descriptor
+ 	return dentry->p && !dentry->s;
+ }
+ 
+-static inline u32 __init get_desc_limit_in_byte(struct desc_struct *dentry)
++static inline u32 get_desc_limit_in_byte(struct desc_struct *dentry)
+ {
+ 	u32 limit = get_desc_limit(dentry);
+ 	if (dentry->g)
+@@ -712,7 +711,7 @@ static inline u32 __init get_desc_limit_in_byte(struct desc_struct *dentry)
+ 	return limit;
+ }
+ 
+-static inline void __init dump_desc_entry(struct desc_struct *dentry)
++static inline void dump_desc_entry(struct desc_struct *dentry)
+ {
+ 	int cpu = smp_processor_id();
+ 	bool is_16byte = is_desc_16byte(dentry);
+@@ -736,7 +735,7 @@ static inline void __init dump_desc_entry(struct desc_struct *dentry)
+ 		dentry->avl, dentry->l, dentry->d, dentry->g, limit, base);
+ }
+ 
+-static inline __init struct desc_struct *get_gdt_entry(unsigned long addr)
++static inline struct desc_struct *get_gdt_entry(unsigned long addr)
+ {
+ 	struct desc_struct *dentry = (struct desc_struct *)addr;
+ 	if (false)
+@@ -744,8 +743,8 @@ static inline __init struct desc_struct *get_gdt_entry(unsigned long addr)
+ 	return dentry;
+ }
+ 
+-static inline u32 __init get_desc_ar(struct desc_struct *dentry,
+-				     bool is_null, bool is_segment)
++static inline u32 get_desc_ar(struct desc_struct *dentry,
++			      bool is_null, bool is_segment)
+ {
+ 	int cpu = smp_processor_id();
+ 	u32 unusable = is_null ? 1 : 0; // 0 = usable; 1 = unusable
+@@ -787,7 +786,7 @@ static inline u32 __init get_desc_ar(struct desc_struct *dentry,
+ 	DEPRIV_SELECTOR(SEG, seg);						\
+ }
+ 
+-static void __init vmx_depriv_cpu_segments(unsigned long gdt_base)
++static void vmx_depriv_cpu_segments(unsigned long gdt_base)
+ {
+ 	int cpu = smp_processor_id();
+ 	struct desc_struct *dentry;
+@@ -812,7 +811,7 @@ static void __init vmx_depriv_cpu_segments(unsigned long gdt_base)
+ 	vmcs_writel(GUEST_GS_BASE, base);
+ }
+ 
+-static void __init vmx_depriv_cpu_ldtr(unsigned long gdt_base)
++static void vmx_depriv_cpu_ldtr(unsigned long gdt_base)
+ {
+ 	int cpu = smp_processor_id();
+ 	struct desc_struct *dentry;
+@@ -824,7 +823,7 @@ static void __init vmx_depriv_cpu_ldtr(unsigned long gdt_base)
+ 	DEPRIV_SELECTOR(LDTR, ldtr);
+ }
+ 
+-static void __init vmx_depriv_cpu_tr(unsigned long gdt_base)
++static void vmx_depriv_cpu_tr(unsigned long gdt_base)
+ {
+ 	int cpu = smp_processor_id();
+ 	struct desc_struct *dentry;
+@@ -854,7 +853,7 @@ static void __init vmx_depriv_cpu_tr(unsigned long gdt_base)
+ 	}
+ }
+ 
+-static void __init vmx_depriv_cpu_desc_tables(void)
++static void vmx_depriv_cpu_desc_tables(void)
+ {
+ 	int cpu = smp_processor_id();
+ 	struct desc_ptr gdt, idt;
+@@ -882,7 +881,7 @@ static void __init vmx_depriv_cpu_desc_tables(void)
+ 	vmx_depriv_cpu_tr(gdt_base);
+ }
+ 
+-static void __init vmx_depriv_cpu_sysenter_msrs(void)
++static void vmx_depriv_cpu_sysenter_msrs(void)
+ {
+ 	u32 low32, high32;
+ 	unsigned long msr;
+@@ -900,7 +899,7 @@ static void __init vmx_depriv_cpu_sysenter_msrs(void)
+ 	vmcs_writel(GUEST_SYSENTER_EIP, msr);
+ }
+ 
+-static void __init vmx_depriv_cpu_misc(void)
++static void vmx_depriv_cpu_misc(void)
+ {
+ 	unsigned long dr7;
+ 	u64 dbg_ctrl;
+@@ -915,7 +914,7 @@ static void __init vmx_depriv_cpu_misc(void)
+ /*
+  * sync host states to guest states
+  */
+-static void __init vmx_depriv_cpu_state(void)
++static void vmx_depriv_cpu_state(void)
+ {
+ 	vmx_depriv_cpu_controls();
+ 	vmx_depriv_cpu_crs();
+@@ -984,7 +983,7 @@ void vmx_depriv_vmcall(void);
+ 	DEPRIV_IRET_STACK_FS_BASE	= vmcs_readl(GUEST_FS_BASE);		\
+ } while (0)
+ 
+-static void __init vmx_depriv_cpu(void *info)
++static void vmx_depriv_cpu(void *info)
+ {
+ 	int cpu = smp_processor_id();
+ 	int node = cpu_to_node(cpu);
+@@ -1257,20 +1256,6 @@ static void vmx_repriv_cpu(void *info)
+ 	vmx_repriv_cpu_release_resources();
+ }
+ 
+-void vmx_repriv_host(void)
+-{
+-	pr_info("depriv: %d cpus deprivileged\n", atomic_read(&depriv_cpu_count));
+-
+-	on_each_cpu(vmx_repriv_cpu, NULL, 0);
+-
+-	if (down_interruptible(&depriv_cpu_count_sema))
+-		pr_err("depriv: reprivileging interrupted\n");
+-
+-	up(&depriv_task_end_sema);
+-
+-	pr_info("depriv: reprivileged host\n");
+-}
+-
+ /*
+  * sync guest state to host w/o changing guest state
+  */
+@@ -1655,19 +1640,28 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	}
+ }
+ 
+-static int depriv_thread_fn(void *unused)
++static int depriv_task(void *unused)
+ {
+ 	depriv_task_cr3_pa = read_cr3_pa();
++	pr_debug("depriv: depriv task cr3: %lx\n", depriv_task_cr3_pa);
+ 
+-	up(&depriv_task_start_sema);
++	sema_init(&depriv_cpu_count_sema, 0);
++	on_each_cpu(vmx_depriv_cpu, NULL, 0);
+ 
+-	pr_debug("depriv: depriv task cr3: %lx\n", depriv_task_cr3_pa);
++	sema_init(&depriv_repriv_sema, 0);
++	if (down_interruptible(&depriv_repriv_sema))
++		pr_err("depriv: repriv semaphore interrupted\n");
++
++	pr_info("depriv: %d cpus deprivileged, reprivileging...\n",
++		atomic_read(&depriv_cpu_count));
++	on_each_cpu(vmx_repriv_cpu, NULL, 0);
+ 
+-	if (down_interruptible(&depriv_task_end_sema))
+-		pr_err("depriv: depriv task interrupted\n");
++	if (down_interruptible(&depriv_cpu_count_sema))
++		pr_err("depriv: cpu count semaphore interrupted\n");
+ 
+-	pr_info("depriv: depriv task exiting\n");
+-	return 1;
++	pr_info("depriv: %d cpus still in non-root mode\n",
++		atomic_read(&depriv_cpu_count));
++	return 0;
+ }
+ 
+ void __init vmx_depriv_host(void)
+@@ -1677,16 +1671,10 @@ void __init vmx_depriv_host(void)
+ 		return;
+ 	}
+ 
+-	sema_init(&depriv_task_start_sema, 0);
+-	sema_init(&depriv_task_end_sema, 0);
+-	sema_init(&depriv_cpu_count_sema, 0);
+-
+-	kthread_run(depriv_thread_fn, NULL, "depriv_task");
+-
+-	if (down_interruptible(&depriv_task_start_sema)) {
+-		pr_info("depriv: depriv task not started yet\n");
+-		return;
+-	}
++	kthread_run(depriv_task, NULL, "depriv_task");
++}
+ 
+-	on_each_cpu(vmx_depriv_cpu, NULL, 0);
++void vmx_repriv_host(void)
++{
++	up(&depriv_repriv_sema);
+ }
+-- 
+2.34.1
+

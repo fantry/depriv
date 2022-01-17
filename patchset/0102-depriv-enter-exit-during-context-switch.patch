@@ -1,0 +1,474 @@
+From 6c33dcc813ccd32d0e9cfc1236b7e94ec0ab7baf Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 2 Sep 2020 00:26:18 -0700
+Subject: [PATCH 102/140] depriv enter/exit during context switch
+
+---
+ arch/x86/include/asm/depriv.h    |  46 +++++++++
+ arch/x86/include/asm/switch_to.h |   3 +
+ arch/x86/kernel/cpu/common.c     |  11 +++
+ arch/x86/kvm/vmx/depriv.c        | 155 ++++++++++++++++++++-----------
+ arch/x86/kvm/vmx/depriv.h        |   1 +
+ arch/x86/kvm/vmx/depriv_entry.S  |  17 ++--
+ arch/x86/kvm/vmx/vmx.c           |   1 +
+ 7 files changed, 174 insertions(+), 60 deletions(-)
+ create mode 100644 arch/x86/include/asm/depriv.h
+
+diff --git a/arch/x86/include/asm/depriv.h b/arch/x86/include/asm/depriv.h
+new file mode 100644
+index 000000000000..2a82238c20dd
+--- /dev/null
++++ b/arch/x86/include/asm/depriv.h
+@@ -0,0 +1,46 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _ASM_X86_DEPRIV_H
++#define _ASM_X86_DEPRIV_H
++
++#include <asm/percpu.h>
++
++DECLARE_PER_CPU(void *, depriv_cpu_state);
++
++struct depriv_ops {
++	bool (*enter)(void);
++	void (*exit)(void);
++};
++
++extern struct depriv_ops depriv_ops;
++
++/*
++ * WARNING: must be called with interrupt disabled!
++ */
++static inline void depriv_enter(void)
++{
++	int cpu = smp_processor_id();
++	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
++
++	if (!host_cpu_state)
++		return;
++
++	if (depriv_ops.enter)
++		depriv_ops.enter();
++}
++
++/*
++ * WARNING: must be called with interrupt disabled!
++ */
++static inline void depriv_exit(void)
++{
++	int cpu = smp_processor_id();
++	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
++
++	if (!host_cpu_state)
++		return;
++
++	if (depriv_ops.exit)
++		depriv_ops.exit();
++}
++
++#endif /* _ASM_X86_DEPRIV_H */
+diff --git a/arch/x86/include/asm/switch_to.h b/arch/x86/include/asm/switch_to.h
+index b5f0d2ff47e4..f13184f9ad6f 100644
+--- a/arch/x86/include/asm/switch_to.h
++++ b/arch/x86/include/asm/switch_to.h
+@@ -3,6 +3,7 @@
+ #define _ASM_X86_SWITCH_TO_H
+ 
+ #include <linux/sched/task_stack.h>
++#include <asm/depriv.h>
+ 
+ struct task_struct; /* one of the stranger aspects of C forward declarations */
+ 
+@@ -46,7 +47,9 @@ struct fork_frame {
+ 
+ #define switch_to(prev, next, last)					\
+ do {									\
++	depriv_exit();							\
+ 	((last) = __switch_to_asm((prev), (next)));			\
++	depriv_enter();							\
+ } while (0)
+ 
+ #ifdef CONFIG_X86_32
+diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
+index 7b8382c11788..5c3d63e17e46 100644
+--- a/arch/x86/kernel/cpu/common.c
++++ b/arch/x86/kernel/cpu/common.c
+@@ -1798,6 +1798,17 @@ static void wrmsrl_cstar(unsigned long val)
+ 		wrmsrl(MSR_CSTAR, val);
+ }
+ 
++#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV)
++DEFINE_PER_CPU(void *, depriv_cpu_state) = NULL;
++EXPORT_PER_CPU_SYMBOL(depriv_cpu_state);
++
++struct depriv_ops depriv_ops = {
++	.enter = NULL,
++	.exit = NULL,
++};
++EXPORT_SYMBOL_GPL(depriv_ops);
++#endif
++
+ /* May not be marked __init: used by software suspend */
+ void syscall_init(void)
+ {
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 07ff8b405532..f5a3f824444d 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -75,9 +75,9 @@ static unsigned long depriv_task_cr3_pa;
+ struct cpumask depriv_cpu_root_mode_mask;
+ static struct semaphore depriv_cpu_count_sema;
+ static atomic_t depriv_cpu_count;
++static bool depriv_cleanup = false;
+ 
+ static DEFINE_PER_CPU(struct vmcs *, depriv_vmcs);
+-static DEFINE_PER_CPU(void *, depriv_cpu_state);
+ 
+ void dump_va_page_table_entry(unsigned long va);
+ 
+@@ -481,6 +481,8 @@ static void vmx_depriv_cpu_misc(void)
+ 	vmcs_write64(GUEST_IA32_DEBUGCTL, dbg_ctrl);
+ }
+ 
++void vmx_depriv_vmexit(void);
++
+ /*
+  * sync host states to guest states
+  */
+@@ -491,6 +493,8 @@ static void vmx_depriv_cpu_state(void)
+ 	vmx_depriv_cpu_desc_tables();
+ 	vmx_depriv_cpu_sysenter_msrs();
+ 	vmx_depriv_cpu_misc();
++
++	vmcs_writel(HOST_RIP, (unsigned long)vmx_depriv_vmexit);
+ }
+ 
+ /*
+@@ -502,18 +506,21 @@ static void vmx_repriv_cpu_release_resources(void)
+ 	void *host_cpu_state = per_cpu(depriv_cpu_state, cpu);
+ 	struct vmcs *vmcs = per_cpu(depriv_vmcs, cpu);
+ 
++	if (!depriv_cleanup)
++		return;
++
+ 	if (host_cpu_state) {
+ 		per_cpu(depriv_cpu_state, cpu) = NULL;
+ 		memset(host_cpu_state, 0, DEPRIV_CPU_STATE_BUFFER_SIZE);
+ 		free_pages((unsigned long)host_cpu_state, DEPRIV_CPU_STATE_PAGE_ORDER);
+-		pr_debug("depriv: repriv cpu%d released cpu state buffer\n", cpu);
++		pr_info("depriv: repriv cpu%d released cpu state buffer\n", cpu);
+ 	}
+ 
+ 	if (vmcs) {
+ 		per_cpu(depriv_vmcs, cpu) = NULL;
+ 		vmcs_clear(vmcs);
+ 		free_vmcs(vmcs);
+-		pr_debug("depriv: repriv cpu%d released root mode VMCS\n", cpu);
++		pr_info("depriv: repriv cpu%d released root mode VMCS\n", cpu);
+ 	}
+ 
+ 	if (atomic_dec_and_test(&depriv_cpu_count))
+@@ -525,13 +532,68 @@ static inline unsigned long depriv_iret_trampoline_stack(int cpu)
+ 	return get_cpu_entry_area(cpu)->tss.x86_tss.ist[IST_INDEX_NMI] - 64 * 8;
+ }
+ 
+-void vmx_depriv_vmexit(void);
+-int vmx_depriv(void);
++int vmx_depriv(bool launch);
+ void vmx_depriv_rip(void);
+-void vmx_depriv_vmcall(void);
+ 
+ void vmx_validate_guest_state(void);
+ 
++static atomic_t depriv_enter_count;
++
++/*
++ * WARNING: must be called with interrupt disabled!
++ */
++static bool __vmx_depriv_enter(bool launch)
++{
++	int cpu = raw_smp_processor_id();
++	unsigned long rip, rsp, rflags;
++	int depriv_result;
++
++	rip = (unsigned long)vmx_depriv_rip;
++	vmcs_writel(GUEST_RIP, rip);
++
++	asm volatile("mov %%rsp,%0" : "=m"(rsp));
++	// reserve extra 8 bytes for RIP pushed to stack when calling vmx_depriv
++	rsp -= 8;
++	vmcs_writel(GUEST_RSP, rsp);
++
++	asm volatile("xor %%rax,%%rax\n\t"
++		     "pushf\n\t"
++		     "pop %%rax\n\t"
++		     "mov %%rax,%0"
++		     : "=m"(rflags) :: "%rax");
++	vmcs_writel(GUEST_RFLAGS, rflags);
++
++	if (!(atomic_inc_return(&depriv_enter_count) % log_mod))
++		pr_info("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n", cpu, rip, rsp);
++
++	/*
++	 * Should we save/restore general purpose registers around vmx_depriv?
++	 */
++	depriv_result = vmx_depriv(launch);
++	if (launch)
++		atomic_inc(&depriv_cpu_count);
++	if (!depriv_result) { // switched to non-root mode
++		if (!launch)
++			cpumask_clear_cpu(cpu, &depriv_cpu_root_mode_mask);
++
++		return true;
++	}
++
++	// still in root mode
++	if (depriv_result == 1)
++		pr_err("depriv: cpu%d launch failed\n", cpu);
++	else if (depriv_result == 2) {
++		pr_err("depriv: cpu%d resume failed\n", cpu);
++		// skip the following vmx_repriv_cpu_release_resources()
++		return true;
++	} else
++		pr_err("depriv: cpu%d unknown deprivilege error %d\n",
++		       cpu, depriv_result);
++
++	vmx_validate_guest_state();
++	return false;
++}
++
+ static void vmx_depriv_cpu(void *info)
+ {
+ 	int cpu = raw_smp_processor_id();
+@@ -541,8 +603,7 @@ static void vmx_depriv_cpu(void *info)
+ 	void *host_cpu_state = NULL;
+ 	void *host_cr3_va = NULL;
+ 	void *msr_bitmap = NULL;
+-	unsigned long rip, rsp, rflags, host_rsp;
+-	int vmx_depriv_result;
++	unsigned long host_rsp;
+ 
+ 	if (!(depriv_vmcs_conf.cpu_based_exec_ctrl & CPU_BASED_USE_MSR_BITMAPS)) {
+ 		pr_err("depriv: MSR bitmap not available on cpu%d\n", cpu);
+@@ -585,7 +646,6 @@ static void vmx_depriv_cpu(void *info)
+ 
+ 	vmx_depriv_cpu_state();
+ 
+-	vmcs_writel(HOST_RIP, (unsigned long)vmx_depriv_vmexit);
+ 	// reserve extra DEPRIV_HOST_STACK_RESERVED_BYTES bytes for reprivileging host
+ 	host_rsp = (unsigned long)msr_bitmap - DEPRIV_HOST_STACK_RESERVED_BYTES;
+ 	vmcs_writel(HOST_RSP, host_rsp);
+@@ -593,23 +653,6 @@ static void vmx_depriv_cpu(void *info)
+ 	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_IRET_STACK) =
+ 		depriv_iret_trampoline_stack(cpu);
+ 
+-	/* switching to non-root mode */
+-	rip = (unsigned long)vmx_depriv_rip;
+-	vmcs_writel(GUEST_RIP, rip);
+-	asm volatile("mov %%rsp,%0" : "=m"(rsp));
+-	// reserve extra 8 bytes for RIP pushed to stack when calling vmx_depriv
+-	rsp -= 8;
+-	vmcs_writel(GUEST_RSP, rsp);
+-
+-	asm volatile("xor %%rax,%%rax\n\t"
+-		     "pushf\n\t"
+-		     "pop %%rax\n\t"
+-		     "mov %%rax,%0"
+-		     : "=m"(rflags) :: "%rax");
+-	vmcs_writel(GUEST_RFLAGS, rflags & ~X86_EFLAGS_IF);
+-
+-	pr_debug("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n", cpu, rip, rsp);
+-
+ 	if (test_early_invalid_state && test_handle_invalid_host_state)
+ 		vmcs_write32(CR3_TARGET_COUNT, DEPRIV_INVALID_HOST_CR3_TARGET_COUNT);
+ 
+@@ -618,27 +661,9 @@ static void vmx_depriv_cpu(void *info)
+ 		vmcs_write32(GUEST_TR_AR_BYTES, ar | VMX_AR_S_MASK);
+ 	}
+ 
+-	/*
+-	 * Should we save/restore general purpose registers around vmx_depriv?
+-	 */
+-	vmx_depriv_result = vmx_depriv();
+-	atomic_inc(&depriv_cpu_count);
+-	if (!vmx_depriv_result)
+-		// switched to non-root mode
+-		return;
+-
+-	// still in root mode
+-	if (vmx_depriv_result == 1)
+-		pr_err("depriv: cpu%d launch failed\n", cpu);
+-	else if (vmx_depriv_result == 2) {
+-		pr_err("depriv: cpu%d resume failed\n", cpu);
+-		// skip the following vmx_repriv_cpu_release_resources()
++	/* switching to non-root mode */
++	if (__vmx_depriv_enter(true))
+ 		return;
+-	} else
+-		pr_err("depriv: cpu%d unknown deprivilege error %d\n",
+-		       cpu, vmx_depriv_result);
+-
+-	vmx_validate_guest_state();
+ 
+ error:
+ 	vmx_repriv_cpu_release_resources();
+@@ -789,6 +814,14 @@ static inline void vmx_repriv_cpu_desc_tables(void)
+ 	vmx_repriv_cpu_tr();
+ }
+ 
++/*
++ * WARNING: must be called with interrupt disabled!
++ */
++static void vmx_depriv_exit(void)
++{
++	asm volatile("vmcall");
++}
++
+ void vmx_repriv_cpu(void *info)
+ {
+ 	int cpu = raw_smp_processor_id();
+@@ -799,7 +832,7 @@ void vmx_repriv_cpu(void *info)
+ 		return;
+ 	}
+ 
+-	vmx_depriv_vmcall();
++	vmx_depriv_exit();
+ 
+ 	// switched to root mode
+ 	pr_info("depriv: cpu%d reprivileged\n", cpu);
+@@ -906,8 +939,9 @@ bool vmx_repriv_cpu_state(void)
+ 
+ 	cpumask_set_cpu(cpu, &depriv_cpu_root_mode_mask);
+ 
+-	pr_info("depriv: cpu%d switching to root mode GS base %#lx kernel GS base %#lx\n",
+-		cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
++	if (depriv_cleanup)
++		pr_info("depriv: cpu%d switching to root mode GS base %#lx kernel GS base %#lx\n",
++			cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ 
+ 	vmx_repriv_cpu_release_resources();
+ 	return true;
+@@ -987,13 +1021,13 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 		break;
+ 
+ 	case EXIT_REASON_VMCALL:
+-		pr_info("depriv: cpu%d (%ld) exit reason: %d cpu mask: %*pb[l]\n",
+-			cpu, counter, reason, cpumask_pr_args(&depriv_cpu_root_mode_mask));
++		pr_debug("depriv: cpu%d (%ld) exit reason: %d cpu mask: %*pb[l]\n",
++			 cpu, counter, reason, cpumask_pr_args(&depriv_cpu_root_mode_mask));
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+ 
+-		pr_info("depriv: cpu%d (%ld) vmcall @ %#lx, switch to root mode\n",
+-			cpu, counter, rip);
++		pr_debug("depriv: cpu%d (%ld) vmcall @ %#lx, switch to root mode\n",
++			 cpu, counter, rip);
+ 		vmcs_writel(GUEST_RIP, rip + insn_len);
+ 		DEPRIV_SWITCH_TO_ROOT_MODE;
+ 		break;
+@@ -1024,6 +1058,11 @@ static int depriv_task(void *unused)
+ 	return 0;
+ }
+ 
++static bool vmx_depriv_enter(void)
++{
++	return __vmx_depriv_enter(false);
++}
++
+ void __init vmx_depriv_host(void)
+ {
+ 	if (setup_depriv_vmcs_config()) {
+@@ -1031,9 +1070,17 @@ void __init vmx_depriv_host(void)
+ 		return;
+ 	}
+ 
++	depriv_ops.enter = vmx_depriv_enter;
++	depriv_ops.exit = vmx_depriv_exit;
++
+ 	kthread_run(depriv_task, NULL, "depriv_task");
+ }
+ 
++void vmx_depriv_signal_cleanup(void)
++{
++	depriv_cleanup = true;
++}
++
+ void vmx_repriv_host(void)
+ {
+ 	int c = atomic_read(&depriv_cpu_count);
+@@ -1053,6 +1100,8 @@ void vmx_repriv_host(void)
+ 		msleep(100);
+ 	}
+ 
++	vmx_depriv_signal_cleanup();
++
+ 	pr_info("depriv: %d cpus deprivileged, reprivileging...\n", c);
+ 	on_each_cpu(vmx_repriv_cpu, NULL, 0);
+ 
+diff --git a/arch/x86/kvm/vmx/depriv.h b/arch/x86/kvm/vmx/depriv.h
+index 955de37954bd..a7f46fec40d5 100644
+--- a/arch/x86/kvm/vmx/depriv.h
++++ b/arch/x86/kvm/vmx/depriv.h
+@@ -3,6 +3,7 @@
+ #define _X86_VMX_DEPRIV_H
+ 
+ void __init vmx_depriv_host(void);
++void vmx_depriv_signal_cleanup(void);
+ void vmx_repriv_cpu(void *info);
+ void vmx_repriv_host(void);
+ 
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index c594b7a4b07c..d93decf7e332 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -79,13 +79,22 @@ SYM_CODE_START(vmx_depriv_switch_to_root_mode)
+ SYM_CODE_END(vmx_depriv_switch_to_root_mode)
+ 
+ SYM_FUNC_START(vmx_depriv)
++	cmpb $0, %_ASM_ARG1B
++	je 1f
++
+ 	/* assuming vmlaunch will succeed */
+ 	xor %rax, %rax
+ 	/* Enter non-root mode */
+ 	vmlaunch
++	jmp 2f
+ 
+-	/* vmlaunch failed, switch to root mode stask */
++1:	/* assuming vmresume will succeed */
+ 	xor %rax, %rax
++	/* Enter non-root mode */
++	vmresume
++
++	/* vmlaunch failed, switch to root mode stask */
++2:	xor %rax, %rax
+ 	mov $1, %rax
+ 	ret
+ SYM_FUNC_END(vmx_depriv)
+@@ -98,12 +107,6 @@ SYM_FUNC_START(vmx_depriv_rip)
+ 	ret
+ SYM_FUNC_END(vmx_depriv_rip)
+ 
+-SYM_FUNC_START(vmx_depriv_vmcall)
+-	/* vmcall */
+-	.byte 0x0f, 0x01, 0xc1
+-	ret
+-SYM_FUNC_END(vmx_depriv_vmcall)
+-
+ SYM_FUNC_START(vmx_depriv_vmexit)
+ 	PUSH_AND_CLEAR_ALL
+ 
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index a7bb0aba4880..4de4d837b3c7 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -2390,6 +2390,7 @@ static void vmclear_local_loaded_vmcss(void)
+ static void hardware_disable(void)
+ {
+ #if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV)
++	vmx_depriv_signal_cleanup();
+ 	vmx_repriv_cpu(NULL);
+ #endif
+ 	vmclear_local_loaded_vmcss();
+-- 
+2.34.1
+

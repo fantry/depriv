@@ -1,0 +1,157 @@
+From b924cd07f007551821c7ce6132961ba527b3980e Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 24 Jun 2020 00:05:28 -0700
+Subject: [PATCH 093/140] all tests passed!!!
+
+---
+ arch/x86/entry/entry_64.S       |  5 +++--
+ arch/x86/kvm/vmx/depriv.c       | 32 +++++++++++++++++++-------------
+ arch/x86/kvm/vmx/test_depriv.sh |  7 ++-----
+ 3 files changed, 24 insertions(+), 20 deletions(-)
+
+diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
+index 0ae83fce34fc..241043554ce7 100644
+--- a/arch/x86/entry/entry_64.S
++++ b/arch/x86/entry/entry_64.S
+@@ -1420,11 +1420,12 @@ SYM_CODE_START(depriv_switch_to_root_mode)
+ 	/*
+ 	 * switch to guest CR3
+ 	 */
+-	mov	0x30(%rsp), %rax
++	mov	6*8(%rsp), %rax
+ 	mov	%rax, %cr3
+ 
+ 	pop	%rax
+-	iretq
++	SWAPGS
++	INTERRUPT_RETURN
+ SYM_CODE_END(depriv_switch_to_root_mode)
+ EXPORT_SYMBOL(depriv_switch_to_root_mode)
+ 
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 92bf83fb26eb..21872ea7e906 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -28,8 +28,8 @@ module_param(test_handle_invalid_host_state, bool, S_IRUGO);
+ static bool __read_mostly test_handle_invalid_guest_state = 0;
+ module_param(test_handle_invalid_guest_state, bool, S_IRUGO);
+ 
+-static bool __read_mostly debug_host_in_non_root_mode = 0;
+-module_param(debug_host_in_non_root_mode, bool, S_IRUGO);
++static unsigned int __read_mostly debug_host_in_non_root_mode = 0;
++module_param(debug_host_in_non_root_mode, uint, 0444);
+ 
+ static bool __read_mostly call_extra_exit_handlers = 1;
+ module_param(call_extra_exit_handlers, bool, S_IRUGO);
+@@ -70,6 +70,8 @@ module_param(intercept_cr3, bool, S_IRUGO);
+ #define DEPRIV_IRET_STACK_GUEST_SS		(4 * 8)
+ #define DEPRIV_IRET_STACK_GUEST_CR3		(5 * 8)
+ 
++#define DEPRIV_INVALID_HOST_CR3_TARGET_COUNT	0x100000
++
+ static struct vmcs_config depriv_vmcs_conf;
+ static unsigned long depriv_task_cr3_pa;
+ struct cpumask depriv_cpu_root_mode_mask;
+@@ -600,7 +602,7 @@ static void vmx_depriv_cpu(void *info)
+ 	pr_debug("depriv: cpu%d deprivileging: rip: %#lx rsp: %#lx\n", cpu, rip, rsp);
+ 
+ 	if (test_early_invalid_state && test_handle_invalid_host_state)
+-		vmcs_write32(CR3_TARGET_COUNT, 0x100000);
++		vmcs_write32(CR3_TARGET_COUNT, DEPRIV_INVALID_HOST_CR3_TARGET_COUNT);
+ 
+ 	if (test_early_invalid_state && test_handle_invalid_guest_state) {
+ 		u32 ar = vmcs_read32(GUEST_TR_AR_BYTES);
+@@ -857,10 +859,14 @@ static void vmx_depriv_debug_with_non_root_mode(void)
+ 	DEPRIV_SELECTOR(SS, seg);
+ 
+ 	vmcs_writel(GUEST_CR3, vmcs_readl(HOST_CR3));
++	vmcs_writel(GUEST_GS_BASE, vmcs_readl(HOST_GS_BASE));
+ 
+ 	vmcs_write32(CR3_TARGET_COUNT, 0);
+ 	vmcs_write32(GUEST_TR_AR_BYTES,
+ 		     vmcs_read32(GUEST_TR_AR_BYTES) & ~VMX_AR_S_MASK);
++
++	pr_info("depriv: cpu%d switching to \"root mode\" GS base %#lx kernel GS base %#lx\n",
++		cpu, vmcs_readl(GUEST_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ }
+ 
+ /*
+@@ -872,7 +878,7 @@ bool vmx_repriv_cpu_state(void)
+ 	unsigned long iret_stack_base = depriv_iret_stack_base(cpu);
+ 	unsigned long host_rsp = vmcs_readl(HOST_RSP);
+ 
+-	if (vmcs_read32(CR3_TARGET_COUNT) != 0)
++	if (vmcs_read32(CR3_TARGET_COUNT) == DEPRIV_INVALID_HOST_CR3_TARGET_COUNT)
+ 		pr_err("depriv: cpu%d invalid host state\n", cpu);
+ 
+ 	vmx_repriv_cpu_crs();
+@@ -883,21 +889,21 @@ bool vmx_repriv_cpu_state(void)
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK;
+ 	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_IRET_STACK) = iret_stack_base;
+ 
+-	if (!vmcs_readl(GUEST_GS_BASE))
+-		wrmsrl(MSR_KERNEL_GS_BASE, vmcs_readl(HOST_GS_BASE));
++	/* prepare for swapgs in depriv_switch_to_root_mode */
++	wrmsrl(MSR_KERNEL_GS_BASE, vmcs_readl(GUEST_GS_BASE));
+ 
+ 	/* powerful switch to debug issues in non-root mode */
+ 	if (debug_host_in_non_root_mode) {
+ 		vmx_depriv_debug_with_non_root_mode();
++	        if (debug_host_in_non_root_mode++ == 10)
++			debug_host_in_non_root_mode = 0;
+ 		return false;
+ 	}
+ 
+ 	cpumask_set_cpu(cpu, &depriv_cpu_root_mode_mask);
+ 
+-	/*
+-	 * last step: overwrite GS base MSR with guest GS base
+-	 */
+-	wrmsrl(MSR_GS_BASE, vmcs_readl(GUEST_GS_BASE));
++	pr_info("depriv: cpu%d switching to root mode GS base %#lx kernel GS base %#lx\n",
++		cpu, read_msr(MSR_GS_BASE), read_msr(MSR_KERNEL_GS_BASE));
+ 	return true;
+ }
+ 
+@@ -959,9 +965,9 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 			     (unsigned int *)&regs[VCPU_REGS_RCX],
+ 			     (unsigned int *)&regs[VCPU_REGS_RDX]);
+ 
+-		if (!test_early_invalid_state && counter > 5000) {
++		if (!test_early_invalid_state && counter > 2000) {
+ 			if (test_handle_invalid_host_state)
+-				vmcs_write32(CR3_TARGET_COUNT, 0x100000);
++				vmcs_write32(CR3_TARGET_COUNT, DEPRIV_INVALID_HOST_CR3_TARGET_COUNT);
+ 
+ 			if (test_handle_invalid_guest_state) {
+ 				u32 ar = vmcs_read32(GUEST_TR_AR_BYTES);
+@@ -1039,7 +1045,7 @@ void vmx_repriv_host(void)
+ 		test_early_invalid_state = true;
+ 		test_handle_invalid_host_state = false;
+ 		test_handle_invalid_guest_state = false;
+-		debug_host_in_non_root_mode = false;
++		debug_host_in_non_root_mode = 0;
+ 
+ 		// XXX wait for all cpus to exit testing mode, there are better ways
+ 		msleep(100);
+diff --git a/arch/x86/kvm/vmx/test_depriv.sh b/arch/x86/kvm/vmx/test_depriv.sh
+index 160c6b9404ee..9412b9d653a8 100755
+--- a/arch/x86/kvm/vmx/test_depriv.sh
++++ b/arch/x86/kvm/vmx/test_depriv.sh
+@@ -7,11 +7,8 @@ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel exception_bitmap=0x2000
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_invalid_host_state=1
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_handle_invalid_guest_state=1
+ 
+-#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_early_invalid_state=0 test_handle_invalid_host_state=1
+-#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_early_invalid_state=0 test_handle_invalid_guest_state=1
+-
+-#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_early_invalid_state=0 test_handle_invalid_host_state=1 debug_host_in_non_root_mode=1
+-#sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_early_invalid_state=0 test_handle_invalid_guest_state=1 debug_host_in_non_root_mode=1
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_early_invalid_state=0 test_handle_invalid_host_state=1 debug_host_in_non_root_mode=1 && make modules
++sudo modprobe -r kvm-intel && sudo modprobe kvm-intel test_early_invalid_state=0 test_handle_invalid_guest_state=1 debug_host_in_non_root_mode=1 && make modules
+ 
+ sudo modprobe -r kvm-intel && sudo modprobe kvm-intel call_extra_exit_handlers=0
+ sudo modprobe smep-flipor && sudo modprobe -r smep-flipor
+-- 
+2.34.1
+

@@ -1,0 +1,69 @@
+From 3fbf559f4d0eba1d904e763e193a15488621e31c Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 11 Jun 2020 00:08:03 -0700
+Subject: [PATCH 010/140] log PCID status in CR access handler
+
+---
+ arch/x86/kvm/vmx/vmx.c | 22 ++++++----------------
+ 1 file changed, 6 insertions(+), 16 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
+index 4bee739f5607..01144d3ec08c 100644
+--- a/arch/x86/kvm/vmx/vmx.c
++++ b/arch/x86/kvm/vmx/vmx.c
+@@ -8861,19 +8861,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 				cpu, guest_rip, insn);
+ 
+ 			DEPRIV_DUMP_GPRS;
+-#if 0
+-			unsigned long guest_cr4 = vmcs_readl(GUEST_CR4);
+-			u8 mov_to_cr3_from_rsp[3] = { 0xf, 0x22, 0xdc };
+-			if (!memcmp((void *)guest_rip, mov_to_cr3_from_rsp, 3)) {
+-				pr_info("depriv: cpu%d executing mov to cr3 from rsp\n", cpu);
+-				if (!(guest_cr4 & X86_CR4_PCIDE)) {
+-					pr_info("depriv: cpu%d PCID disabled, fixing rsp\n", cpu);
+-					vmcs_writel(GUEST_RSP, guest_rsp & ~X86_CR3_PCID_NOFLUSH);
+-					CONTINUE_IN_NON_ROOT_MODE;
+-				} else
+-					pr_info("depriv: cpu%d PCID enabled\n", cpu);
+-			}
+-#endif
+ 		} else if (is_machine_check(intr_info))
+ 			pr_info("depriv: cpu%d to handle machine check in root mode\n", cpu);
+ 		else if (is_machine_check(intr_info) || is_nmi(intr_info))
+@@ -8888,17 +8875,22 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 				cpu, vector);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		}
+-		break;
+ 	}
+ 
+ 	case EXIT_REASON_CR_ACCESS: {
+ 		unsigned long qualification = vmcs_readl(EXIT_QUALIFICATION);
+ 		int cr = qualification & 0xf;
+ 		int reg = (qualification >> 8) & 0xf;
++		unsigned long guest_cr4 = vmcs_readl(GUEST_CR4);
+ 
+ 		if (cr != 3)
+ 			CONTINUE_IN_ROOT_MODE(0);
+ 
++		if (guest_cr4 & X86_CR4_PCIDE)
++			pr_info("depriv: cpu%d PCID enabled\n", cpu);
++		else
++			pr_info("depriv: cpu%d PCID disabled\n", cpu);
++
+ 		switch ((qualification >> 4) & 3) {
+ 		case 0: { /* mov to cr */
+ 			unsigned long cr3 = guest_regs[reg];
+@@ -9064,8 +9056,6 @@ bool vmx_depriv_vmexit_handler(unsigned long *guest_regs)
+ 			pr_debug("depriv: cpu%d executed wrmsr and continue in non-root mode\n", cpu);
+ 			CONTINUE_IN_NON_ROOT_MODE;
+ 		}
+-
+-		break;
+ 	}
+ 
+ 	default: /* continue in root mode */
+-- 
+2.34.1
+

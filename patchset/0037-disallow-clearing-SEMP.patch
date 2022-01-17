@@ -1,0 +1,162 @@
+From ae2530cd46d4b6fa913670dc181fa4ac18bf2db1 Mon Sep 17 00:00:00 2001
+From: lxin <lxin@localhost.localdomain>
+Date: Tue, 16 Jun 2020 00:31:20 -0700
+Subject: [PATCH 037/140] disallow clearing SEMP
+
+---
+ arch/x86/kvm/vmx/depriv.c | 119 ++++++++++++++++++++++++++++----------
+ 1 file changed, 87 insertions(+), 32 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index ace31138c9f1..53141cbd857c 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -686,7 +686,7 @@ static void __init vmx_depriv_cpu_crs(void)
+ 	cr4 = __read_cr4();
+ 	vmcs_writel(HOST_CR4, cr4);
+ 	vmcs_writel(CR4_READ_SHADOW, cr4);
+-	vmcs_writel(GUEST_CR4, cr4 | (X86_CR4_PAE | X86_CR4_VMXE));
++	vmcs_writel(GUEST_CR4, cr4);
+ 
+ 	vmcs_writel(CR0_GUEST_HOST_MASK, ~X86_CR0_TS);
+ 	vmcs_writel(CR4_GUEST_HOST_MASK, ~DEPRIV_CR4_NON_ROOT_OWNED_BITS);
+@@ -1468,6 +1468,82 @@ static void dump_fsgs_base(unsigned long host_rsp, u32 reason)
+ 			 cpu, *cnt, reason, base, last_base);
+ }
+ 
++static void handle_cr3_access(unsigned long host_rsp, unsigned long *regs, unsigned long qualification)
++{
++	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
++	int cpu = smp_processor_id();
++	int reg = (qualification >> 8) & 0xf;
++
++	switch ((qualification >> 4) & 3) {
++	case 0: { /* mov to cr */
++		unsigned long cr3 = regs[reg];
++		unsigned long cr4 = vmcs_readl(GUEST_CR4);
++
++		if (!(cr4 & X86_CR4_PCIDE))
++			pr_debug("depriv: cpu%d (%ld) PCID disabled\n", cpu, *cnt);
++		else
++			pr_debug("depriv: cpu%d (%ld) PCID enabled\n", cpu, *cnt);
++
++		cr3 &= ~X86_CR3_PCID_NOFLUSH;
++		vmcs_writel(GUEST_CR3, cr3);
++
++		pr_debug("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx)\n",
++			 cpu, *cnt, reg, cr3, regs[reg]);
++		break;
++	}
++	case 1: /*mov from cr*/
++		regs[reg] = vmcs_readl(GUEST_CR3);
++
++		/* XXX RSP in regs won't be loaded into non-root mode */
++		if (reg == VCPU_REGS_RSP)
++			vmcs_writel(GUEST_RSP, regs[reg]);
++
++		pr_debug("depriv: cpu%d (%ld) read cr3 to reg%d: %#lx\n",
++			 cpu, *cnt, reg, regs[reg]);
++		break;
++	}
++}
++
++static void handle_cr4_access(unsigned long host_rsp, unsigned long *regs, unsigned long qualification)
++{
++	unsigned long *cnt = (unsigned long *)(host_rsp + DEPRIV_HOST_STACK_VM_EXIT_COUNT);
++	int cpu = smp_processor_id();
++	int reg = (qualification >> 8) & 0xf;
++
++	switch ((qualification >> 4) & 3) {
++	case 0: { /* mov to cr */
++		unsigned long val = regs[reg];
++		unsigned long cr4 = vmcs_readl(GUEST_CR4);
++
++		if ((val ^ cr4) & X86_CR4_SMEP) {
++			if (val & X86_CR4_SMEP) {
++				pr_err("depriv: cpu%d (%ld) setting SMEP\n", cpu, *cnt);
++			} else {
++				pr_err("depriv: cpu%d (%ld) clearing SMEP\n", cpu, *cnt);
++				val |= X86_CR4_SMEP;
++			}
++		}
++
++		vmcs_writel(CR4_READ_SHADOW, val);
++		vmcs_writel(GUEST_CR4, val);
++
++		pr_info("depriv: cpu%d (%ld) wrote cr4 from reg%d: %#lx (%#lx)\n",
++			cpu, *cnt, reg, val, regs[reg]);
++		break;
++	}
++	case 1: /*mov from cr*/
++		regs[reg] = vmcs_readl(GUEST_CR4);
++
++		/* XXX RSP in regs won't be loaded into non-root mode */
++		if (reg == VCPU_REGS_RSP)
++			vmcs_writel(GUEST_RSP, regs[reg]);
++
++		pr_info("depriv: cpu%d (%ld) read cr4 to reg%d: %#lx\n",
++			cpu, *cnt, reg, regs[reg]);
++		break;
++	}
++}
++
+ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ {
+ 	unsigned long host_rsp = vmcs_readl(HOST_RSP);
+@@ -1563,43 +1639,22 @@ bool vmx_depriv_vmexit_handler(unsigned long *regs)
+ 	case EXIT_REASON_CR_ACCESS: {
+ 		unsigned long qualification = vmcs_readl(EXIT_QUALIFICATION);
+ 		int cr = qualification & 0xf;
+-		int reg = (qualification >> 8) & 0xf;
+-
+-		if (cr != 3)
+-			DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+-
+-		switch ((qualification >> 4) & 3) {
+-		case 0: { /* mov to cr */
+-			unsigned long cr3 = regs[reg];
+-			unsigned long cr4 = vmcs_readl(GUEST_CR4);
+ 
+-			if (!(cr4 & X86_CR4_PCIDE))
+-				pr_debug("depriv: cpu%d (%ld) PCID disabled\n", cpu, *cnt);
+-			else
+-				pr_debug("depriv: cpu%d (%ld) PCID enabled\n", cpu, *cnt);
+-
+-			cr3 &= ~X86_CR3_PCID_NOFLUSH;
+-			vmcs_writel(GUEST_CR3, cr3);
+-
+-			pr_debug("depriv: cpu%d (%ld) wrote cr3 from reg%d: %#lx (%#lx)\n",
+-				 cpu, *cnt, cr, cr3, regs[reg]);
++		switch (cr) {
++		case 3:
++			handle_cr3_access(host_rsp, regs, qualification);
+ 			break;
+-		}
+-		case 1: /*mov from cr*/
+-			regs[reg] = vmcs_readl(GUEST_CR3);
+-
+-			/* XXX RSP in regs won't be loaded into non-root mode */
+-			if (reg == VCPU_REGS_RSP)
+-				vmcs_writel(GUEST_RSP, regs[reg]);
+-
+-			pr_debug("depriv: cpu%d (%ld) read cr3 to reg%d: %#lx\n",
+-				 cpu, *cnt, cr, regs[reg]);
++		case 4:
++			handle_cr4_access(host_rsp, regs, qualification);
++			break;
++		default:
++			DEPRIV_CONTINUE_IN_ROOT_MODE(0);
+ 			break;
+ 		}
+ 
+ 		insn_len = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+-		pr_debug("depriv: cpu%d (%ld) accessed cr3 and continue in non-root mode\n",
+-			 cpu, *cnt);
++		pr_debug("depriv: cpu%d (%ld) accessed cr%d and continue in non-root mode\n",
++			 cpu, *cnt, cr);
+ 		DEPRIV_CONTINUE_IN_NON_ROOT_MODE(insn_len);
+ 	}
+ 
+-- 
+2.34.1
+

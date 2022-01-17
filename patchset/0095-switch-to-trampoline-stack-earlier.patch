@@ -1,0 +1,55 @@
+From b07cbbe30314e51c2ed4924c225b6fb430c738d1 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Wed, 24 Jun 2020 15:33:06 -0700
+Subject: [PATCH 095/140] switch to trampoline stack earlier
+
+---
+ arch/x86/kvm/vmx/depriv.c       |  3 +--
+ arch/x86/kvm/vmx/depriv_entry.S | 10 +++++-----
+ 2 files changed, 6 insertions(+), 7 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 26b708114d0f..1ed0ec4ff395 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -522,8 +522,7 @@ static void vmx_repriv_cpu_release_resources(void)
+ 
+ static inline unsigned long depriv_iret_trampoline_stack(int cpu)
+ {
+-	return get_cpu_entry_area(cpu)->tss.x86_tss.ist[IST_INDEX_NMI] -
+-	       CEA_ESTACK_SIZE(NMI) + 64 * 8;
++	return get_cpu_entry_area(cpu)->tss.x86_tss.ist[IST_INDEX_NMI] - 64 * 8;
+ }
+ 
+ void vmx_depriv_vmexit(void);
+diff --git a/arch/x86/kvm/vmx/depriv_entry.S b/arch/x86/kvm/vmx/depriv_entry.S
+index b3c35f53ef79..6c9c8c341861 100644
+--- a/arch/x86/kvm/vmx/depriv_entry.S
++++ b/arch/x86/kvm/vmx/depriv_entry.S
+@@ -61,6 +61,11 @@
+ 	.text
+ 
+ SYM_CODE_START(vmx_depriv_switch_to_root_mode)
++	/*
++	 * switch to iret trampoline stack, which is mapped even in user space CR3
++	 */
++	mov 2*8(%rsp), %rsp
++
+ 	PUSH_AND_CLEAR_ALL
+ 
+ 	call vmx_repriv_cpu_state
+@@ -68,11 +73,6 @@ SYM_CODE_START(vmx_depriv_switch_to_root_mode)
+ 
+ 	POP_ALL
+ 
+-	/*
+-	 * switch to iret trampoline stack, which is mapped even in user space CR3
+-	 */
+-	mov 2*8(%rsp), %rsp
+-
+ 	je depriv_switch_to_root_mode
+ 	vmresume
+ 	/* XXX what if vmresume fails? */
+-- 
+2.34.1
+

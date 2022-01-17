@@ -1,0 +1,42 @@
+From d874b0cfe585dcf353747f5f26619ec8d70b0df6 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Tue, 23 Jun 2020 11:08:36 -0700
+Subject: [PATCH 089/140] please no system reset when driver is being unloaded
+ in testing mode
+
+---
+ arch/x86/kvm/vmx/depriv.c | 11 +++++++++++
+ 1 file changed, 11 insertions(+)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index a9f126549f09..24a693d83167 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -6,6 +6,7 @@
+  * 	Xin Li <fantry@gmail.com>
+  */
+ 
++#include <linux/delay.h>
+ #include <linux/semaphore.h>
+ #include <linux/kvm_host.h>
+ 
+@@ -1034,6 +1035,16 @@ void vmx_repriv_host(void)
+ 		return;
+ 	}
+ 
++	if (test_handle_invalid_host_state || test_handle_invalid_guest_state) {
++		test_early_invalid_state = true;
++		test_handle_invalid_host_state = false;
++		test_handle_invalid_guest_state = false;
++		debug_host_in_non_root_mode = false;
++
++		// XXX wait for all cpus to exit testing mode, there are better ways
++		msleep(100);
++	}
++
+ 	pr_info("depriv: %d cpus deprivileged, reprivileging...\n", c);
+ 	on_each_cpu(vmx_repriv_cpu, NULL, 0);
+ 
+-- 
+2.34.1
+

@@ -1,0 +1,32 @@
+From 9b6847ef37bacafead89fe65b46222d6c387fd4f Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Sun, 21 Jun 2020 20:48:15 -0700
+Subject: [PATCH 080/140] dump iret stack when resuming guest code in root mode
+
+---
+ arch/x86/kvm/vmx/depriv.c | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv.c b/arch/x86/kvm/vmx/depriv.c
+index 0cf686a66487..0881333cf1ad 100644
+--- a/arch/x86/kvm/vmx/depriv.c
++++ b/arch/x86/kvm/vmx/depriv.c
+@@ -843,7 +843,14 @@ void vmx_repriv_cpu_state(void)
+ 
+ 	DEPRIV_SET_ROOT_MODE_TRAMPOLINE_STACK;
+ 
+-	pr_info("depriv: cpu%d iret stack base %#lx\n", cpu, iret_stack_base);
++	pr_info("depriv: cpu%d iret stack base %#lx: %#lx:%#lx  %#lx %#lx:%#lx\n",
++		cpu, iret_stack_base,
++		*((unsigned long *)(iret_stack_base + 0x8)),
++		*((unsigned long *)(iret_stack_base + 0x0)),
++		*((unsigned long *)(iret_stack_base + 0x10)),
++		*((unsigned long *)(iret_stack_base + 0x20)),
++		*((unsigned long *)(iret_stack_base + 0x18)));
++
+ 	*(unsigned long *)(host_rsp + DEPRIV_HOST_STACK_IRET_STACK) = iret_stack_base;
+ 
+ 	/*
+-- 
+2.34.1
+

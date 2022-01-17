@@ -1,0 +1,86 @@
+From f2e409788d34c99d3e1d6d8428b2a57ead9674c8 Mon Sep 17 00:00:00 2001
+From: Xin Li <fantry@msn.com>
+Date: Thu, 18 Jun 2020 22:14:23 -0700
+Subject: [PATCH 063/140] reduce indent
+
+---
+ arch/x86/kvm/vmx/depriv_handler.c | 41 ++++++++++++++-----------------
+ 1 file changed, 18 insertions(+), 23 deletions(-)
+
+diff --git a/arch/x86/kvm/vmx/depriv_handler.c b/arch/x86/kvm/vmx/depriv_handler.c
+index b3c16c0b8d46..240dca0bcd51 100644
+--- a/arch/x86/kvm/vmx/depriv_handler.c
++++ b/arch/x86/kvm/vmx/depriv_handler.c
+@@ -130,7 +130,7 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 	bool continue_in_root_mode = true;
+ 	u32 intr_info = vmcs_read32(VM_EXIT_INTR_INFO);
+ 	u8 vector = intr_info & INTR_INFO_VECTOR_MASK;
+-	u32 error_code = 0;
++	u32 error_code = 0, intr;
+ 
+ 	if (intr_info & INTR_INFO_DELIVER_CODE_MASK)
+ 		error_code = vmcs_read32(VM_EXIT_INTR_ERROR_CODE);
+@@ -144,18 +144,15 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 	pr_info("depriv: cpu%d (%ld) hit exception %d @ rip %#lx insn: %s\n",
+ 		cpu, cnt, vector, rip, insn);
+ 
+-	if (is_invalid_opcode(intr_info)) {
+-		pr_info("depriv: cpu%d (%ld) hit UD @ rip %#lx insn: %s\n",
+-			cpu, cnt, rip, insn);
+-	} else if (is_page_fault(intr_info)) {
++	if (is_page_fault(intr_info)) {
+ 		unsigned long cr2 = vmcs_readl(EXIT_QUALIFICATION);
+ 		pr_info("depriv: cpu%d (%ld) page fault @ %#lx with error code %#x\n",
+ 			cpu, cnt, cr2, error_code);
+ 		native_write_cr2(cr2);
+ 		continue_in_root_mode = false;
+-	} else if (is_gp_fault(intr_info)) {
++	} else if (is_gp_fault(intr_info))
+ 		continue_in_root_mode = false;
+-	} else if (is_machine_check(intr_info))
++	else if (is_machine_check(intr_info))
+ 		pr_info("depriv: cpu%d (%ld) to handle machine check in root mode\n", cpu, cnt);
+ 	else if (is_machine_check(intr_info) || is_nmi(intr_info))
+ 		pr_info("depriv: cpu%d (%ld) to handle NMI in root mode\n", cpu, cnt);
+@@ -164,24 +161,22 @@ static int handle_exception_nmi(unsigned long *regs, unsigned long cnt)
+ 		pr_info("depriv: cpu%d (%ld) hit exception %d, continue in root mode\n",
+ 			cpu, cnt, vector);
+ 		return 1;
+-	} else {
+-		u32 intr;
+-
+-		intr = vector | INTR_INFO_VALID_MASK;
+-		if (vector == DF_VECTOR || vector == GP_VECTOR || vector == PF_VECTOR)
+-			intr |= INTR_TYPE_HARD_EXCEPTION;
+-		if (vector == GP_VECTOR || vector == PF_VECTOR)
+-			intr |= INTR_INFO_DELIVER_CODE_MASK;
+-		vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr);
+-		vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, insn_len);
+-		vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
+-		pr_info("depriv: cpu%d (%ld) injecting exception %d, continue in non-root mode\n",
+-			cpu, cnt, vector);
++	}
+ 
+-		DEPRIV_DUMP_GPRS;
++	intr = vector | INTR_INFO_VALID_MASK;
++	if (vector == DF_VECTOR || vector == GP_VECTOR || vector == PF_VECTOR)
++		intr |= INTR_TYPE_HARD_EXCEPTION;
++	if (vector == GP_VECTOR || vector == PF_VECTOR)
++		intr |= INTR_INFO_DELIVER_CODE_MASK;
++	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr);
++	vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, insn_len);
++	vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, error_code);
++	pr_info("depriv: cpu%d (%ld) injecting exception %d, continue in non-root mode\n",
++		cpu, cnt, vector);
+ 
+-		return 0;
+-	}
++	DEPRIV_DUMP_GPRS;
++
++	return 0;
+ }
+ 
+ static int handle_cr_access(unsigned long *regs, unsigned long cnt)
+-- 
+2.34.1
+
