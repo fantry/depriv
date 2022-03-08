@@ -12,7 +12,7 @@ index f384cb1a4f7a..44e7bea7cee0 100644
  
  # Xen paravirtualization support
 diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
-index 407533c835fe..6fe6b58305c8 100644
+index 9f5bd41bf660..ceb16a64bf4b 100644
 --- a/arch/x86/Kconfig
 +++ b/arch/x86/Kconfig
 @@ -221,6 +221,7 @@ config X86
@@ -23,7 +23,7 @@ index 407533c835fe..6fe6b58305c8 100644
  	select HAVE_LIVEPATCH			if X86_64
  	select HAVE_MIXED_BREAKPOINTS_REGS
  	select HAVE_MOD_ARCH_SPECIFIC
-@@ -2884,4 +2885,6 @@ config HAVE_ATOMIC_IOMAP
+@@ -2875,4 +2876,6 @@ config HAVE_ATOMIC_IOMAP
  
  source "arch/x86/kvm/Kconfig"
  
@@ -94,10 +94,10 @@ index 000000000000..45e9e2fe1d30
 +obj-$(CONFIG_DEPRIV_INTEL)	+= depriv-intel.o
 diff --git a/arch/x86/depriv/vmx/depriv.c b/arch/x86/depriv/vmx/depriv.c
 new file mode 100644
-index 000000000000..2e63a15a821e
+index 000000000000..e2b924dcb34a
 --- /dev/null
 +++ b/arch/x86/depriv/vmx/depriv.c
-@@ -0,0 +1,702 @@
+@@ -0,0 +1,704 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Deprivilege is to run Linux kernel in VMX non-root mode
@@ -164,9 +164,9 @@ index 000000000000..2e63a15a821e
 +#define DEPRIV_HOST_STACK_VM_EXIT_COUNT		(0 * 8)
 +#define DEPRIV_HOST_STACK_IRET_STACK		(1 * 8)
 +
-+struct cpumask cpu_depriv_mode_mask;
++cpumask_t cpu_depriv_mode_mask;
 +
-+static struct cpumask cpu_vmx_operation_mask;
++static cpumask_t cpu_vmx_operation_mask;
 +static bool volatile depriv_exiting = false;
 +static DEFINE_PER_CPU(struct vmcs *, current_vmcs);
 +
@@ -667,22 +667,22 @@ index 000000000000..2e63a15a821e
 +
 +static void vmx_on_destroy_pid_ns(struct pid_namespace *ns)
 +{
-+	struct cpumask depriv_cpu_context_mask;
++	cpumask_t* depriv_cpu_context_mask = kmalloc(sizeof(cpumask_t), GFP_KERNEL);
 +	int cpu;
 +
 +	if (!ns)
 +		return;
 +
-+	cpumask_clear(&depriv_cpu_context_mask);
++	cpumask_clear(depriv_cpu_context_mask);
 +
 +	for_each_cpu(cpu, cpu_online_mask)
 +		if (ns->depriv_context->cpu_context[cpu] != NULL)
-+			cpumask_set_cpu(cpu, &depriv_cpu_context_mask);
++			cpumask_set_cpu(cpu, depriv_cpu_context_mask);
 +
-+	on_each_cpu_mask(&depriv_cpu_context_mask, vmx_free_loaded_vmcs, (void *)ns, 0);
++	on_each_cpu_mask(depriv_cpu_context_mask, vmx_free_loaded_vmcs, (void *)ns, 0);
++
++	kfree(depriv_cpu_context_mask);
 +}
-+
-+extern struct depriv_ops depriv_ops;
 +
 +static void vmx_dump_context(unsigned long va)
 +{
@@ -697,6 +697,8 @@ index 000000000000..2e63a15a821e
 +	       cpu, cpumask_pr_args(&cpu_depriv_mode_mask));
 +	dump_va_page_table_entry(va);
 +}
++
++extern struct depriv_ops depriv_ops;
 +
 +static void vmx_depriv_cleanup(void)
 +{
@@ -1894,10 +1896,10 @@ index 000000000000..8594b7d3ecad
 +}
 diff --git a/arch/x86/depriv/vmx/vmx.c b/arch/x86/depriv/vmx/vmx.c
 new file mode 100644
-index 000000000000..d9562e54e288
+index 000000000000..33d2f7eab031
 --- /dev/null
 +++ b/arch/x86/depriv/vmx/vmx.c
-@@ -0,0 +1,986 @@
+@@ -0,0 +1,989 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Deprivilege is to run Linux kernel in VMX non-root mode
@@ -2447,7 +2449,7 @@ index 000000000000..d9562e54e288
 +	u32 ar;
 +	bool is_segment = false;
 +
-+	store_tr(tr);
++	tr = native_store_tr();
 +	if (tr != GDT_ENTRY_TSS*8)
 +		pr_err("depriv: cpu%d tr selector mismatch %#x : %#x\n",
 +		       cpu, tr, GDT_ENTRY_TSS*8);
@@ -2514,7 +2516,7 @@ index 000000000000..d9562e54e288
 +	struct desc_ptr gdt, idt;
 +	unsigned long gdt_base;
 +
-+	store_gdt(&gdt);
++	native_store_gdt(&gdt);
 +	gdt_base = gdt.address;
 +	if (gdt_base != (unsigned long)get_current_gdt_ro())
 +		pr_err("depriv: cpu%d gdt base mismatch %#lx : %#lx\n",
@@ -2708,7 +2710,7 @@ index 000000000000..d9562e54e288
 +	if (host_ldtr != ldtr) {
 +		pr_info("depriv: repriv cpu%d LDTR mismatch %#x : %#x\n",
 +			cpu, host_ldtr, ldtr);
-+		load_ldt(ldtr);
++		asm volatile("lldt %0"::"m" (ldtr));
 +	}
 +}
 +
@@ -2717,19 +2719,20 @@ index 000000000000..d9562e54e288
 +	int cpu = raw_smp_processor_id();
 +	u16 tr = vmcs_read16(GUEST_TR_SELECTOR), host_tr;
 +
-+	store_tr(host_tr);
++	host_tr = native_store_tr();
 +	if (host_tr != tr) {
 +		pr_info("depriv: repriv cpu%d TR mismatch %#x : %#x\n",
 +			cpu, host_tr, tr);
 +		if (tr == 0)
 +			return;
-+		load_tr(tr);
++		asm volatile("ltr %0"::"m" (tr));
 +		vmcs_write16(HOST_TR_SELECTOR, tr);
 +	}
 +}
 +
++#define native_store_idt store_idt
 +#define REPRIV_DESC_TABLE(tag, TAG) do {						\
-+	store_##tag##dt(&host_dt);							\
++	native_store_##tag##dt(&host_dt);						\
 +	dt_base = vmcs_readl(GUEST_##TAG##DTR_BASE);					\
 +	if (host_dt.address != dt_base)							\
 +		pr_err("depriv: repriv cpu%d " #tag "dt base mismatch %#lx : %#lx\n",	\
@@ -2758,6 +2761,8 @@ index 000000000000..d9562e54e288
 +	vmx_repriv_cpu_ldtr();
 +	vmx_repriv_cpu_tr();
 +}
++
++#undef native_store_idt
 +
 +/*
 + * needed to iret to root mode kernel or user space when the VM exit happened
@@ -2886,10 +2891,10 @@ index 000000000000..d9562e54e288
 +}
 diff --git a/arch/x86/depriv/vmx/vmx.h b/arch/x86/depriv/vmx/vmx.h
 new file mode 100644
-index 000000000000..795525f3cd78
+index 000000000000..348b4ed0c995
 --- /dev/null
 +++ b/arch/x86/depriv/vmx/vmx.h
-@@ -0,0 +1,347 @@
+@@ -0,0 +1,357 @@
 +/* SPDX-License-Identifier: GPL-2.0 */
 +#ifndef __DEPRIV_X86_VMX_H
 +#define __DEPRIV_X86_VMX_H
@@ -2901,6 +2906,16 @@ index 000000000000..795525f3cd78
 +#include <asm/depriv.h>
 +#include <asm/page.h>
 +#include <asm/vmx.h>
++
++#ifdef CONFIG_X86_64
++static inline unsigned long read_msr(unsigned long msr)
++{
++	u64 value;
++
++	rdmsrl(msr, value);
++	return value;
++}
++#endif
 +
 +#define DE_VECTOR 0
 +#define DB_VECTOR 1
@@ -3313,13 +3328,14 @@ index 7fec5dcf6438..261a39737ec4 100644
  obj-y				+= vdso/
  obj-y				+= vsyscall/
 diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
-index 466df3e50276..74046a34e447 100644
+index 466df3e50276..f7c9db3c4830 100644
 --- a/arch/x86/entry/entry_64.S
 +++ b/arch/x86/entry/entry_64.S
-@@ -1414,6 +1414,19 @@ nmi_restore:
- 	iretq
- SYM_CODE_END(asm_exc_nmi)
- 
+@@ -1439,3 +1439,17 @@ SYM_CODE_START(rewind_stack_and_make_dead)
+ 	call	make_task_dead
+ SYM_CODE_END(rewind_stack_and_make_dead)
+ .popsection
++
 +SYM_CODE_START(asm_depriv_exit)
 +	testb	$3, 8(%rsp)
 +	jz	1f
@@ -3328,14 +3344,11 @@ index 466df3e50276..74046a34e447 100644
 +	SWITCH_TO_USER_CR3_STACK scratch_reg=%rdi
 +	popq	%rdi
 +
-+1:	SWAPGS
-+	INTERRUPT_RETURN
++1:	swapgs
++
++	iretq
 +SYM_CODE_END(asm_depriv_exit)
 +EXPORT_SYMBOL(asm_depriv_exit)
-+
- #ifndef CONFIG_IA32_EMULATION
- /*
-  * This handles SYSCALL from 32-bit code.  There is no way to program
 diff --git a/arch/x86/include/asm/cpufeatures.h b/arch/x86/include/asm/cpufeatures.h
 index 6db4e2932b3d..9b4504c18e5e 100644
 --- a/arch/x86/include/asm/cpufeatures.h
@@ -3390,28 +3403,6 @@ index 000000000000..8b81951c9ab2
 +}
 +
 +#endif /* _ASM_X86_DEPRIV_H */
-diff --git a/arch/x86/include/asm/kvm_host.h b/arch/x86/include/asm/kvm_host.h
-index 0677b9ea01c9..5d20ec0846c9 100644
---- a/arch/x86/include/asm/kvm_host.h
-+++ b/arch/x86/include/asm/kvm_host.h
-@@ -1822,15 +1822,10 @@ static inline void kvm_load_ldt(u16 sel)
- 	asm("lldt %0" : : "rm"(sel));
- }
- 
--#ifdef CONFIG_X86_64
--static inline unsigned long read_msr(unsigned long msr)
-+static inline u32 get_rdx_init_val(void)
- {
--	u64 value;
--
--	rdmsrl(msr, value);
--	return value;
-+	return 0x600; /* P6 family */
- }
--#endif
- 
- static inline void kvm_inject_gp(struct kvm_vcpu *vcpu, u32 error_code)
- {
 diff --git a/arch/x86/include/asm/kvm_vcpu_regs.h b/arch/x86/include/asm/kvm_vcpu_regs.h
 index 1af2cb59233b..3bfb862af3f9 100644
 --- a/arch/x86/include/asm/kvm_vcpu_regs.h
@@ -3442,27 +3433,6 @@ index 1af2cb59233b..3bfb862af3f9 100644
 +#include <asm/x86_vcpu_regs.h>
  
  #endif /* _ASM_X86_KVM_VCPU_REGS_H */
-diff --git a/arch/x86/include/asm/msr.h b/arch/x86/include/asm/msr.h
-index d42e6c6b47b1..bd3eb52525aa 100644
---- a/arch/x86/include/asm/msr.h
-+++ b/arch/x86/include/asm/msr.h
-@@ -266,6 +266,16 @@ static inline void wrmsr(unsigned int msr, u32 low, u32 high)
- #define rdmsrl(msr, val)			\
- 	((val) = native_read_msr((msr)))
- 
-+#ifdef CONFIG_X86_64
-+static inline unsigned long read_msr(unsigned long msr)
-+{
-+	u64 value;
-+
-+	rdmsrl(msr, value);
-+	return value;
-+}
-+#endif
-+
- static inline void wrmsrl(unsigned int msr, u64 val)
- {
- 	native_write_msr(msr, (u32)(val & 0xffffffffULL), (u32)(val >> 32));
 diff --git a/arch/x86/include/asm/switch_to.h b/arch/x86/include/asm/switch_to.h
 index b5f0d2ff47e4..c6202fee085b 100644
 --- a/arch/x86/include/asm/switch_to.h
@@ -3548,28 +3518,6 @@ index 000000000000..cb56520bd49b
 +#endif
 +
 +#endif /* _ASM_X86_VCPU_REGS_H */
-diff --git a/arch/x86/kernel/cpu/common.c b/arch/x86/kernel/cpu/common.c
-index 7b8382c11788..5c3d63e17e46 100644
---- a/arch/x86/kernel/cpu/common.c
-+++ b/arch/x86/kernel/cpu/common.c
-@@ -1798,6 +1798,17 @@ static void wrmsrl_cstar(unsigned long val)
- 		wrmsrl(MSR_CSTAR, val);
- }
- 
-+#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV)
-+DEFINE_PER_CPU(void *, depriv_cpu_state) = NULL;
-+EXPORT_PER_CPU_SYMBOL(depriv_cpu_state);
-+
-+struct depriv_ops depriv_ops = {
-+	.enter = NULL,
-+	.exit = NULL,
-+};
-+EXPORT_SYMBOL_GPL(depriv_ops);
-+#endif
-+
- /* May not be marked __init: used by software suspend */
- void syscall_init(void)
- {
 diff --git a/arch/x86/kernel/cpu/feat_ctl.c b/arch/x86/kernel/cpu/feat_ctl.c
 index da696eb4821a..534de8385a58 100644
 --- a/arch/x86/kernel/cpu/feat_ctl.c
@@ -3583,43 +3531,15 @@ index da696eb4821a..534de8385a58 100644
  	if (c->vmx_capability[MISC_FEATURES] & VMX_F(EPT_AD))
  		set_cpu_cap(c, X86_FEATURE_EPT_AD);
  	if (c->vmx_capability[MISC_FEATURES] & VMX_F(VPID))
-diff --git a/arch/x86/kvm/vmx/vmx.c b/arch/x86/kvm/vmx/vmx.c
-index 1b2e9d8c5cc9..539ca4e6e878 100644
---- a/arch/x86/kvm/vmx/vmx.c
-+++ b/arch/x86/kvm/vmx/vmx.c
-@@ -38,6 +38,9 @@
- #include <asm/fpu/api.h>
- #include <asm/fpu/xstate.h>
- #include <asm/idtentry.h>
-+#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV_HOST)
-+#include <asm/insn.h>
-+#endif
- #include <asm/io.h>
- #include <asm/irq_remapping.h>
- #include <asm/kexec.h>
-diff --git a/arch/x86/kvm/vmx/vmx.h b/arch/x86/kvm/vmx/vmx.h
-index f8fc7441baea..81f0c6b7630a 100644
---- a/arch/x86/kvm/vmx/vmx.h
-+++ b/arch/x86/kvm/vmx/vmx.h
-@@ -577,4 +577,9 @@ static inline int vmx_get_instr_info_reg2(u32 vmx_instr_info)
- 	return (vmx_instr_info >> 28) & 0xf;
- }
- 
-+#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV_HOST)
-+bool vmx_depriv_vmexit_handler(unsigned long *guset_regs);
-+void vmx_check_guest_state(void);
-+#endif
-+
- #endif /* __KVM_X86_VMX_H */
 diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
-index a086197af544..8d6f58982ee2 100644
+index a086197af544..c6b1d4774dbf 100644
 --- a/drivers/misc/Makefile
 +++ b/drivers/misc/Makefile
 @@ -59,3 +59,4 @@ obj-$(CONFIG_UACCE)		+= uacce/
  obj-$(CONFIG_XILINX_SDFEC)	+= xilinx_sdfec.o
  obj-$(CONFIG_HISI_HIKEY_USB)	+= hisi_hikey_usb.o
  obj-$(CONFIG_HI6421V600_IRQ)	+= hi6421v600-irq.o
-+obj-$(CONFIG_KVM_INTEL_DEPRIV)	+= smep_flipor.o
++obj-$(CONFIG_HAVE_DEPRIV)	+= smep_flipor.o
 diff --git a/drivers/misc/smep_flipor.c b/drivers/misc/smep_flipor.c
 new file mode 100644
 index 000000000000..b4558bf382ea
@@ -3758,7 +3678,7 @@ index dceac12c1ce5..63c065b7edc5 100644
  
  struct gfn_to_hva_cache {
 diff --git a/include/linux/pid_namespace.h b/include/linux/pid_namespace.h
-index 7c7e627503d2..8a8bf4c71282 100644
+index 07481bb87d4e..1adbc0a704d2 100644
 --- a/include/linux/pid_namespace.h
 +++ b/include/linux/pid_namespace.h
 @@ -15,6 +15,7 @@
@@ -3894,7 +3814,7 @@ index a46a3723bc66..0d04b6705d01 100644
  
  #ifdef CONFIG_CHECKPOINT_RESTORE
 diff --git a/tools/arch/x86/include/asm/cpufeatures.h b/tools/arch/x86/include/asm/cpufeatures.h
-index d5b5f2ab87a0..a35d86ce8d00 100644
+index 6db4e2932b3d..9b4504c18e5e 100644
 --- a/tools/arch/x86/include/asm/cpufeatures.h
 +++ b/tools/arch/x86/include/asm/cpufeatures.h
 @@ -230,6 +230,7 @@
@@ -3954,19 +3874,3 @@ index 000000000000..25a2e8d05e70
 + * Authors:
 + * 	Xin Li <fantry@gmail.com>
 + */
-diff --git a/virt/kvm/kvm_main.c b/virt/kvm/kvm_main.c
-index 504158f0e131..6ce518dd2103 100644
---- a/virt/kvm/kvm_main.c
-+++ b/virt/kvm/kvm_main.c
-@@ -5779,6 +5779,11 @@ EXPORT_SYMBOL_GPL(kvm_init);
- void kvm_exit(void)
- {
- 	int cpu;
-+#if IS_ENABLED(CONFIG_KVM_INTEL_DEPRIV) // XXX: hacky
-+	raw_spin_lock(&kvm_count_lock);
-+	kvm_usage_count--;
-+	raw_spin_unlock(&kvm_count_lock);
-+#endif
- 
- 	debugfs_remove_recursive(kvm_debugfs_dir);
- 	misc_deregister(&kvm_dev);
