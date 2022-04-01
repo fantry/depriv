@@ -1,8 +1,8 @@
 diff --git a/arch/x86/Kbuild b/arch/x86/Kbuild
-index f384cb1a4f7a..44e7bea7cee0 100644
+index 5a83da703e87..4ff7c729ad01 100644
 --- a/arch/x86/Kbuild
 +++ b/arch/x86/Kbuild
-@@ -3,6 +3,8 @@ obj-y += entry/
+@@ -5,6 +5,8 @@ obj-y += entry/
  
  obj-$(CONFIG_PERF_EVENTS) += events/
  
@@ -12,18 +12,18 @@ index f384cb1a4f7a..44e7bea7cee0 100644
  
  # Xen paravirtualization support
 diff --git a/arch/x86/Kconfig b/arch/x86/Kconfig
-index 9f5bd41bf660..ceb16a64bf4b 100644
+index ff45a27fc29c..be1d28bd6855 100644
 --- a/arch/x86/Kconfig
 +++ b/arch/x86/Kconfig
-@@ -221,6 +221,7 @@ config X86
- 	select HAVE_FUNCTION_ERROR_INJECTION
+@@ -226,6 +226,7 @@ config X86
  	select HAVE_KRETPROBES
+ 	select HAVE_RETHOOK
  	select HAVE_KVM
 +	select HAVE_DEPRIV			if X86_64
  	select HAVE_LIVEPATCH			if X86_64
  	select HAVE_MIXED_BREAKPOINTS_REGS
  	select HAVE_MOD_ARCH_SPECIFIC
-@@ -2875,4 +2876,6 @@ config HAVE_ATOMIC_IOMAP
+@@ -2888,4 +2889,6 @@ config HAVE_ATOMIC_IOMAP
  
  source "arch/x86/kvm/Kconfig"
  
@@ -3328,10 +3328,10 @@ index 7fec5dcf6438..261a39737ec4 100644
  obj-y				+= vdso/
  obj-y				+= vsyscall/
 diff --git a/arch/x86/entry/entry_64.S b/arch/x86/entry/entry_64.S
-index 466df3e50276..f7c9db3c4830 100644
+index 4faac48ebec5..18c04ad6b516 100644
 --- a/arch/x86/entry/entry_64.S
 +++ b/arch/x86/entry/entry_64.S
-@@ -1439,3 +1439,17 @@ SYM_CODE_START(rewind_stack_and_make_dead)
+@@ -1462,3 +1462,17 @@ SYM_CODE_START(rewind_stack_and_make_dead)
  	call	make_task_dead
  SYM_CODE_END(rewind_stack_and_make_dead)
  .popsection
@@ -3350,7 +3350,7 @@ index 466df3e50276..f7c9db3c4830 100644
 +SYM_CODE_END(asm_depriv_exit)
 +EXPORT_SYMBOL(asm_depriv_exit)
 diff --git a/arch/x86/include/asm/cpufeatures.h b/arch/x86/include/asm/cpufeatures.h
-index 6db4e2932b3d..9b4504c18e5e 100644
+index 73e643ae94b6..fe3ad622ce74 100644
 --- a/arch/x86/include/asm/cpufeatures.h
 +++ b/arch/x86/include/asm/cpufeatures.h
 @@ -230,6 +230,7 @@
@@ -3532,13 +3532,13 @@ index da696eb4821a..534de8385a58 100644
  		set_cpu_cap(c, X86_FEATURE_EPT_AD);
  	if (c->vmx_capability[MISC_FEATURES] & VMX_F(VPID))
 diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
-index a086197af544..c6b1d4774dbf 100644
+index 70e800e9127f..96310be28fb3 100644
 --- a/drivers/misc/Makefile
 +++ b/drivers/misc/Makefile
-@@ -59,3 +59,4 @@ obj-$(CONFIG_UACCE)		+= uacce/
- obj-$(CONFIG_XILINX_SDFEC)	+= xilinx_sdfec.o
+@@ -60,3 +60,4 @@ obj-$(CONFIG_XILINX_SDFEC)	+= xilinx_sdfec.o
  obj-$(CONFIG_HISI_HIKEY_USB)	+= hisi_hikey_usb.o
  obj-$(CONFIG_HI6421V600_IRQ)	+= hi6421v600-irq.o
+ obj-$(CONFIG_OPEN_DICE)		+= open-dice.o
 +obj-$(CONFIG_HAVE_DEPRIV)	+= smep_flipor.o
 diff --git a/drivers/misc/smep_flipor.c b/drivers/misc/smep_flipor.c
 new file mode 100644
@@ -3814,7 +3814,7 @@ index a46a3723bc66..0d04b6705d01 100644
  
  #ifdef CONFIG_CHECKPOINT_RESTORE
 diff --git a/tools/arch/x86/include/asm/cpufeatures.h b/tools/arch/x86/include/asm/cpufeatures.h
-index 6db4e2932b3d..9b4504c18e5e 100644
+index 3edf05e98e58..4ee3743f0aa5 100644
 --- a/tools/arch/x86/include/asm/cpufeatures.h
 +++ b/tools/arch/x86/include/asm/cpufeatures.h
 @@ -230,6 +230,7 @@
